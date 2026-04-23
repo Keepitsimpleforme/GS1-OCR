@@ -24,8 +24,8 @@ set -euo pipefail
 
 # ── Edit these before running ─────────────────────────────────────────────────
 REPO_URL="https://github.com/Keepitsimpleforme/GS1-OCR.git"
-APP_DIR="/home/ubuntu/ocr-project"   # change "ubuntu" if your VM user is different
-APP_USER="${SUDO_USER:-ubuntu}"      # your VM login username (ubuntu / ec2-user / etc.)
+APP_USER="${SUDO_USER:-$(whoami)}"   # auto-detects your Linux username (no manual edit needed)
+APP_DIR="/home/$APP_USER/ocr-project"
 OCR_MODEL="maternion/LightOnOCR-2"
 EXTRACT_MODEL="qwen2.5:7b"
 # ─────────────────────────────────────────────────────────────────────────────
