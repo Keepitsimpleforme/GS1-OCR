@@ -1,0 +1,48 @@
+name: Deploy to VM
+
+# Triggers on every push to main
+on:
+  push:
+    branches: [main]
+
+  # Also allow manual trigger from the GitHub Actions tab
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: SSH deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      # ── 1. Checkout (needed so the action has the latest SHA for logs) ─────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. SSH into the VM and run the deploy script ──────────────────────
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:     ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key:      ${{ secrets.VM_SSH_KEY }}
+          port:     ${{ secrets.VM_PORT || 22 }}
+          # Give the OCR model plenty of time — first pip install can be slow
+          command_timeout: 10m
+          script: |
+            set -euo pipefail
+            export APP_DIR="$HOME/ocr-project"
+            bash "$APP_DIR/scripts/deploy.sh"
+
+      # ── 3. Quick smoke-test: confirm /health returns 200 ──────────────────
+      - name: Health check
+        run: |
+          echo "Waiting 10 s for backend to restart…"
+          sleep 10
+          STATUS=$(curl -sf -o /dev/null -w "%{http_code}" \
+            "http://${{ secrets.VM_HOST }}/health" || echo "000")
+          echo "Health endpoint returned HTTP $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "::error::Health check failed (HTTP $STATUS)"
+            exit 1
+          fi

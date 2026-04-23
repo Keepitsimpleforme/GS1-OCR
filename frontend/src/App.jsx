@@ -1,9 +1,44 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import './App.css'
 
 const ACCEPT = 'image/jpeg,image/png,image/webp,image/gif'
+const REQUEST_TIMEOUT_MS = 45000
+const HEALTH_TIMEOUT_MS = 7000
+const SLOW_NOTICE_MS = 12000
+const FIELD_CONFIG = [
+  { label: 'MRP', keys: ['mrp'] },
+  { label: 'GTIN', keys: ['gtin', 'GTIN'] },
+  { label: 'FSSAI', keys: ['fssai'] },
+  { label: 'Email', keys: ['email'] },
+  { label: 'Phone', keys: ['phone'] },
+  { label: 'Net Wt', keys: ['net_wt'] },
+  { label: 'Nutritional', keys: ['nutritional', 'nutritable'] },
+  { label: 'Ingredients', keys: ['ingredients'] },
+]
+
+function extractFirstTableHtml(text) {
+  if (!text) return null
+  const match = text.match(/<table\b[\s\S]*?<\/table>/i)
+  return match ? match[0] : null
+}
+
+function parseTableRows(tableHtml) {
+  if (!tableHtml || typeof window === 'undefined') return null
+  const parser = new window.DOMParser()
+  const doc = parser.parseFromString(tableHtml, 'text/html')
+  const table = doc.querySelector('table')
+  if (!table) return null
+
+  const rows = Array.from(table.querySelectorAll('tr')).map((row) =>
+    Array.from(row.querySelectorAll('th, td'))
+      .map((cell) => cell.textContent?.trim() ?? '')
+      .filter((cell) => cell !== ''),
+  )
+  const filteredRows = rows.filter((row) => row.length > 0)
+  return filteredRows.length > 0 ? filteredRows : null
+}
 
 function App() {
   const [file, setFile] = useState(null)
@@ -11,15 +46,27 @@ function App() {
   const [recentImages, setRecentImages] = useState([])
   const [draggedRecentFile, setDraggedRecentFile] = useState(null)
   const [text, setText] = useState('')
+  const [fields, setFields] = useState(null)
   const [model, setModel] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [slowNotice, setSlowNotice] = useState(false)
   const [dragOver, setDragOver] = useState(false)
   const [healthOk, setHealthOk] = useState(null)
   const inputRef = useRef(null)
+  const tableRows = useMemo(() => {
+    const fieldTable =
+      extractFirstTableHtml(fields?.nutritional) ??
+      extractFirstTableHtml(fields?.nutritable)
+    const source = fieldTable ?? extractFirstTableHtml(text)
+    return parseTableRows(source)
+  }, [fields, text])
 
   useEffect(() => {
-    fetch('/health')
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS)
+
+    fetch('/health', { signal: controller.signal })
       .then((r) => {
         setHealthOk(r.ok)
         return r.json().catch(() => ({}))
@@ -28,6 +75,12 @@ function App() {
         if (data.model) setModel(data.model)
       })
       .catch(() => setHealthOk(false))
+      .finally(() => clearTimeout(timeoutId))
+
+    return () => {
+      clearTimeout(timeoutId)
+      controller.abort()
+    }
   }, [])
 
   useEffect(() => {
@@ -47,6 +100,7 @@ function App() {
     }
     setError('')
     setText('')
+    setFields(null)
     setFile(f)
   }, [])
 
@@ -64,14 +118,20 @@ function App() {
   const extract = async () => {
     if (!file) return
     setLoading(true)
+    setSlowNotice(false)
     setError('')
     setText('')
+    setFields(null)
     const form = new FormData()
     form.append('file', file)
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+    const slowNoticeId = setTimeout(() => setSlowNotice(true), SLOW_NOTICE_MS)
     try {
-      const res = await fetch('/api/extract', {
+      const res = await fetch('/api/extract/product-info', {
         method: 'POST',
         body: form,
+        signal: controller.signal,
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
@@ -79,6 +139,9 @@ function App() {
         return
       }
       setText(data.text ?? '')
+      const apiFields =
+        data.fields && typeof data.fields === 'object' ? data.fields : null
+      setFields(apiFields)
       if (data.model) setModel(data.model)
       setRecentImages((prev) => {
         if (!file) return prev
@@ -98,8 +161,17 @@ function App() {
         return next
       })
     } catch (err) {
+      if (err?.name === 'AbortError') {
+        setError(
+          `Extraction timed out after ${Math.floor(REQUEST_TIMEOUT_MS / 1000)}s. Try a clearer or smaller image.`,
+        )
+        return
+      }
       setError(err.message ?? 'Network error')
     } finally {
+      clearTimeout(timeoutId)
+      clearTimeout(slowNoticeId)
+      setSlowNotice(false)
       setLoading(false)
     }
   }
@@ -170,13 +242,18 @@ function App() {
               disabled={!file || loading}
               onClick={extract}
             >
-              {loading ? 'Extracting…' : 'Extract text'}
+              {loading ? 'Extracting…' : 'Extract fields'}
             </button>
           </div>
 
           {error && (
             <p className="banner error" role="alert">
               {typeof error === 'string' ? error : JSON.stringify(error)}
+            </p>
+          )}
+          {loading && slowNotice && (
+            <p className="banner warn" role="status">
+              Extraction is taking longer than usual. We are still processing your image.
             </p>
           )}
         </section>
@@ -206,14 +283,56 @@ function App() {
         </section>
 
         <section className="panel result-panel" aria-live="polite">
-          <h2 className="result-title">Extracted content</h2>
-          {!text && !loading && (
+          <h2 className="result-title">Extracted product info</h2>
+          {!fields && !loading && (
             <p className="placeholder">Results appear here after extraction.</p>
           )}
-          {loading && <p className="placeholder">Running OCR…</p>}
+          {loading && <p className="placeholder">Extracting product fields…</p>}
+          {fields && (
+            <div className="field-list">
+              {FIELD_CONFIG.map((field) => {
+                const value =
+                  field.keys
+                    .map((key) => fields[key])
+                    .find((entry) => entry !== null && entry !== undefined && entry !== '') ?? null
+                const hasNutritionTable = field.label === 'Nutritional' && tableRows
+                return (
+                  <div
+                    className={`field-row ${hasNutritionTable ? 'field-row-stacked' : ''}`}
+                    key={field.label}
+                  >
+                    <p className="field-label">{field.label}</p>
+                    {hasNutritionTable ? (
+                      <div className="nutrition-table-wrap">
+                        <table className="nutrition-table">
+                          <tbody>
+                            {tableRows.map((row, rowIdx) => (
+                              <tr key={`${field.label}-${rowIdx}`}>
+                                {row.map((cell, cellIdx) => {
+                                  const CellTag = rowIdx === 0 ? 'th' : 'td'
+                                  return <CellTag key={`${field.label}-${rowIdx}-${cellIdx}`}>{cell}</CellTag>
+                                })}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : value ? (
+                      <p className="field-value">{value}</p>
+                    ) : (
+                      <p className="field-value field-empty">—</p>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
           {text && (
-            <div className="markdown-body">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+            <div className="raw-output">
+              <p className="raw-output-title">Raw OCR text</p>
+              <div className="markdown-body">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+              </div>
             </div>
           )}
         </section>

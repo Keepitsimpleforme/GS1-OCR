@@ -1,0 +1,31 @@
+[Unit]
+Description=GS1 OCR Backend (FastAPI + Uvicorn)
+After=network.target ollama.service
+Wants=ollama.service
+
+[Service]
+Type=simple
+User=__APP_USER__
+
+# setup-vm.sh replaces __APP_DIR__ with the real path at install time
+WorkingDirectory=__APP_DIR__/backend
+EnvironmentFile=__APP_DIR__/.env
+
+ExecStart=__APP_DIR__/backend/.venv/bin/python \
+    -m uvicorn main:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --workers 1 \
+    --log-level info
+
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ocr-backend
+
+[Install]
+WantedBy=multi-user.target

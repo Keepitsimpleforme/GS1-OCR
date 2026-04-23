@@ -1,4 +1,14 @@
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 python-multipart>=0.0.12
+pydantic>=2.0.0
+# Ollama Python client
 ollama>=0.4.0
+# HTTP client used by llm_extractor (direct Ollama REST calls)
+requests>=2.31.0
+# Barcode decoding — requires system lib: sudo apt-get install libzbar0
+pyzbar>=0.1.9
+Pillow>=10.0.0
+# OpenCV for 3-stage barcode preprocessing (CLAHE, adaptive threshold)
+# Requires system lib on Ubuntu: sudo apt-get install libgl1-mesa-glx
+opencv-python-headless>=4.8.0

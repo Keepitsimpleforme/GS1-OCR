@@ -5,7 +5,7 @@
 }
 
 .header {
-  margin-bottom: 28px;
+  margin-bottom: 10px;
 }
 
 .header-title {
@@ -15,8 +15,8 @@
 }
 
 .header-logo {
-  width: 80px;
-  height: 80px;
+  width: 50px;
+  height: 50px;
   object-fit: contain;
   border-radius: 6px;
 }
@@ -189,8 +189,99 @@
   grid-column: 2;
   grid-row: 1 / span 2;
   min-height: 200px;
-  max-height: min(75vh, 900px);
+  max-height: min(82vh, 1000px);
   overflow: auto;
+}
+
+.field-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 0.7fr));
+  justify-content: space-between;
+  gap: 4px;
+}
+
+@media (max-width: 1100px) {
+  .field-list {
+    grid-template-columns: 1fr;
+  }
+}
+
+.field-row {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  padding: 4px 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.field-row-stacked {
+  display: block;
+}
+
+.field-label {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.field-value {
+  margin: 0;
+  color: var(--text-h);
+  line-height: 1.35;
+  font-size: 13px;
+  word-break: break-word;
+  text-align: right;
+}
+
+.field-value.field-empty {
+  color: var(--text);
+  opacity: 0.35;
+  font-size: 15px;
+  font-weight: 300;
+  letter-spacing: 0.05em;
+}
+
+.nutrition-table-wrap {
+  margin-top: 4px;
+  overflow-x: auto;
+}
+
+.nutrition-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.nutrition-table th,
+.nutrition-table td {
+  border: 1px solid var(--border);
+  padding: 4px 6px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.nutrition-table th {
+  background: var(--code-bg);
+}
+
+.raw-output {
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.raw-output-title {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
 }
 
 .recent-panel {
@@ -232,8 +323,8 @@
 }
 
 .markdown-body {
-  font-size: 15px;
-  line-height: 1.55;
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 .markdown-body h1,
@@ -252,14 +343,14 @@
 .markdown-body table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 14px;
-  margin: 12px 0;
+  font-size: 12px;
+  margin: 8px 0;
 }
 
 .markdown-body th,
 .markdown-body td {
   border: 1px solid var(--border);
-  padding: 8px 10px;
+  padding: 4px 6px;
   text-align: left;
 }
 
@@ -278,8 +369,75 @@
 
 .markdown-body pre {
   overflow: auto;
-  padding: 12px;
+  padding: 8px;
   border-radius: 8px;
   background: var(--bg);
   border: 1px solid var(--border);
+}
+
+@media print {
+  .app {
+    padding: 8px;
+  }
+
+  .header {
+    margin-bottom: 8px;
+  }
+
+  .header-logo,
+  .recent-panel,
+  .banner.warn,
+  .banner.error {
+    display: none !important;
+  }
+
+  .upload-panel {
+    display: block !important;
+    margin-bottom: 8px;
+  }
+
+  .dropzone,
+  .actions {
+    display: none !important;
+  }
+
+  .upload-panel .preview-wrap {
+    margin-top: 0;
+  }
+
+  .upload-panel .preview {
+    max-height: 180px;
+    object-fit: contain;
+  }
+
+  .header h1 {
+    font-size: 18px;
+    margin: 0;
+  }
+
+  .layout {
+    display: block;
+  }
+
+  .panel {
+    padding: 8px;
+    border: 1px solid #d0d0d0;
+    background: #fff;
+  }
+
+  .result-panel {
+    max-height: none;
+    overflow: visible;
+    min-height: 0;
+  }
+
+  .field-list {
+    grid-template-columns: 1fr 1fr;
+    gap: 3px;
+  }
+
+  .field-row,
+  .raw-output {
+    break-inside: avoid;
+  }
 }
