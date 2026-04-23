@@ -23,7 +23,7 @@ except Exception:
 
 MODEL: Final = os.getenv("OLLAMA_MODEL", "maternion/LightOnOCR-2")
 MAX_BYTES: Final = int(os.getenv("MAX_UPLOAD_MB", "20")) * 1024 * 1024
-OLLAMA_TIMEOUT_SECONDS: Final = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "45"))
+OLLAMA_TIMEOUT_SECONDS: Final = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "180"))
 OLLAMA_HEALTH_TIMEOUT_SECONDS: Final = float(
     os.getenv("OLLAMA_HEALTH_TIMEOUT_SECONDS", "5")
 )
