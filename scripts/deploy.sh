@@ -4,11 +4,11 @@
 #
 # Assumes setup-vm.sh has already been run once.
 # Safe to run manually too:
-#   ssh user@vm 'bash /opt/ocr-project/scripts/deploy.sh'
+#   ssh user@vm 'bash ~/ocr-project/scripts/deploy.sh'
 # =============================================================================
 set -euo pipefail
 
-APP_DIR="/opt/ocr-project"
+APP_DIR="${APP_DIR:-$HOME/ocr-project}"   # override by exporting APP_DIR before calling
 
 echo "[deploy] $(date '+%Y-%m-%d %H:%M:%S') — starting"
 

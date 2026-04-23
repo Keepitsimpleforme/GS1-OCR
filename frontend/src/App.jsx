@@ -294,7 +294,7 @@ function App() {
                 const value =
                   field.keys
                     .map((key) => fields[key])
-                    .find((entry) => entry !== null && entry !== undefined && entry !== '') ?? 'Not found'
+                    .find((entry) => entry !== null && entry !== undefined && entry !== '') ?? null
                 const hasNutritionTable = field.label === 'Nutritional' && tableRows
                 return (
                   <div
@@ -317,8 +317,10 @@ function App() {
                           </tbody>
                         </table>
                       </div>
-                    ) : (
+                    ) : value ? (
                       <p className="field-value">{value}</p>
+                    ) : (
+                      <p className="field-value field-empty">—</p>
                     )}
                   </div>
                 )

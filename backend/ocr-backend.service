@@ -1,31 +1,28 @@
 [Unit]
 Description=GS1 OCR Backend (FastAPI + Uvicorn)
-Documentation=https://github.com/YOUR_ORG/ocr-project
 After=network.target ollama.service
 Wants=ollama.service
 
 [Service]
 Type=simple
-User=ubuntu
-WorkingDirectory=/opt/ocr-project/backend
+User=__APP_USER__
 
-# Load optional .env from project root
-EnvironmentFile=-/opt/ocr-project/.env
+# setup-vm.sh replaces __APP_DIR__ with the real path at install time
+WorkingDirectory=__APP_DIR__/backend
+EnvironmentFile=__APP_DIR__/.env
 
-ExecStart=/opt/ocr-project/backend/.venv/bin/python \
+ExecStart=__APP_DIR__/backend/.venv/bin/python \
     -m uvicorn main:app \
     --host 127.0.0.1 \
     --port 8000 \
     --workers 1 \
     --log-level info
 
-# Restart automatically if the process crashes
 Restart=on-failure
 RestartSec=5
 StartLimitIntervalSec=60
 StartLimitBurst=3
 
-# Log to journald (view with: sudo journalctl -u ocr-backend -f)
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=ocr-backend

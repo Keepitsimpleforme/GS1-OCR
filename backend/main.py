@@ -86,32 +86,54 @@ def _extract_emails(text: str) -> list[str]:
 
 
 def _extract_phones(text: str) -> list[str]:
-    strict_matches = re.findall(
-        r"(?:\+91[\s-]?)?\b\d{10,11}\b|\(\+91\)[\s-]?\d{10,11}\b",
-        text,
-        flags=re.I,
-    )
+    """Extract phone numbers using a strict Indian-mobile pattern only.
 
-    # Fallback to previous broad behavior when strict parsing fails.
-    matches = strict_matches or re.findall(
-        r"(?:\+?91[\s-]?)?[6-9]\d{9}|(?:\+?\d{1,3}[\s-]?)?(?:\d[\s-]?){8,12}\d",
+    The old broad fallback matched batch codes, serial numbers, and dates.
+    Now we only accept numbers that look like genuine Indian phone numbers:
+    10-digit numbers starting with 6-9, or +91-prefixed equivalents.
+    """
+    matches = re.findall(
+        r"(?:\+91[\s-]?|0)?[6-9]\d{9}",
         text,
     )
     cleaned: list[str] = []
     seen: set[str] = set()
     for match in matches:
-        normalized = re.sub(r"\s+", "", match).strip("-")
-        digits = re.sub(r"\D", "", normalized)
-        if len(digits) < 10 or len(digits) > 13:
+        digits = re.sub(r"\D", "", match)
+        # Strip leading country code to normalise
+        if digits.startswith("91") and len(digits) == 12:
+            digits = digits[2:]
+        if len(digits) != 10:
             continue
         if digits not in seen:
             seen.add(digits)
-            cleaned.append(normalized)
+            cleaned.append(match.strip())
     return cleaned
 
 
+def _gtin_checksum_valid(digits: str) -> bool:
+    """Return True if `digits` passes the GS1 check-digit algorithm.
+
+    Covers EAN-8 (8), UPC-A (12), EAN-13 (13), and GTIN-14 (14).
+    The last digit is the check digit; the rest are the payload.
+    """
+    if not digits.isdigit() or len(digits) not in {8, 12, 13, 14}:
+        return False
+    total = sum(
+        int(d) * (3 if i % 2 == 0 else 1)
+        for i, d in enumerate(reversed(digits[:-1]))
+    )
+    expected_check = (10 - (total % 10)) % 10
+    return expected_check == int(digits[-1])
+
+
 def _extract_fssai(text: str) -> Optional[str]:
-    # Strict: only accept 14-digit value for FSSAI.
+    """Extract a 14-digit FSSAI licence number.
+
+    Only returns a value when a recognised keyword (FSSAI / Lic. No.) is
+    present nearby.  The old blind "any 14-digit number" fallback has been
+    removed because it produced false positives (serial numbers, order codes).
+    """
     label_match = re.search(
         r"\b(?:fssai|lic(?:ence|ense)?(?:\s*no\.?)?)\b[^0-9]{0,20}((?:\d[\s-]?){14})\b",
         text,
@@ -121,13 +143,24 @@ def _extract_fssai(text: str) -> Optional[str]:
         digits = re.sub(r"\D", "", label_match.group(1))
         if len(digits) == 14:
             return digits
-
-    for token in re.findall(r"\b\d{14}\b", text):
-        return token
     return None
 
 
 def _extract_gtin(text: str, fssai: Optional[str]) -> Optional[str]:
+    """Extract a GTIN from OCR text using a strict three-tier strategy.
+
+    Tier 1 — explicit keyword label (GTIN / EAN / UPC / Barcode): trusted as-is.
+    Tier 2 — number alone on its own line: common when OCR reads a barcode
+              caption; accepted only if it also passes the GS1 checksum.
+    Tier 3 — any number in the text: accepted ONLY when the GS1 checksum
+              passes, so random phone numbers, dates, and batch codes are
+              rejected.
+
+    Returns None (leave blank) when no confident match is found.
+    """
+    _VALID_LENGTHS = {8, 12, 13, 14}
+
+    # Tier 1: keyword-labelled — the label is our confidence signal
     labeled = re.search(
         r"\b(?:gtin|ean|upc|barcode)\b[^0-9]{0,20}([0-9][0-9\s-]{7,20})",
         text,
@@ -135,17 +168,30 @@ def _extract_gtin(text: str, fssai: Optional[str]) -> Optional[str]:
     )
     if labeled:
         digits = re.sub(r"\D", "", labeled.group(1))
-        if len(digits) in {8, 12, 13, 14} and digits != fssai:
+        if len(digits) in _VALID_LENGTHS and digits != fssai:
             return digits
 
-    for token in re.findall(r"\b\d{8,14}\b", text):
-        if len(token) in {8, 12, 13, 14} and token != fssai:
+    # Tier 2: lone number on its own line + checksum
+    for m in re.finditer(r"(?m)^\s*(\d{8,14})\s*$", text):
+        digits = m.group(1)
+        if len(digits) in _VALID_LENGTHS and digits != fssai and _gtin_checksum_valid(digits):
+            return digits
+
+    # Tier 3: number anywhere in text — checksum required to avoid false positives
+    for token in re.findall(r"\b(\d{8,14})\b", text):
+        if len(token) in _VALID_LENGTHS and token != fssai and _gtin_checksum_valid(token):
             return token
-    return None
+
+    return None  # don't guess — leave blank
 
 
 def _is_valid_gtin(value: str, fssai: Optional[str]) -> bool:
-    return value.isdigit() and len(value) in {8, 12, 13, 14} and value != fssai
+    return (
+        value.isdigit()
+        and len(value) in {8, 12, 13, 14}
+        and value != fssai
+        and _gtin_checksum_valid(value)
+    )
 
 
 def _decode_barcodes_from_bytes(body: bytes) -> list[str]:
@@ -204,20 +250,31 @@ def _pick_gtin_from_barcodes(barcodes: list[str], fssai: Optional[str]) -> Optio
 
 
 def _extract_mrp(text: str) -> Optional[str]:
-    patterns = [
-        r"\bmrp\b[^0-9]{0,25}(?:rs\.?|inr|₹)?\s*([0-9]+(?:\.[0-9]{1,2})?)",
-        r"(?:₹|rs\.?|inr)\s*([0-9]+(?:\.[0-9]{1,2})?)\s*(?:/\s*[-a-z]+)?",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, flags=re.I)
-        if match:
-            return match.group(1)
-    return None
+    """Extract MRP — only returns a value when the MRP keyword is present.
+
+    The old currency-symbol-only fallback (₹ / Rs.) has been removed because
+    it matched prices on ingredient tables, per-unit costs, etc.
+    """
+    match = re.search(
+        r"\bmrp\b[^0-9]{0,40}(?:rs\.?|inr|₹)?\s*([0-9]+(?:\.[0-9]{1,2})?)\s*(?:/-)?",
+        text,
+        flags=re.I,
+    )
+    return match.group(1) if match else None
 
 
 def _extract_net_wt(text: str) -> Optional[str]:
+    """Extract net weight / quantity / volume.
+
+    Handles all common label wordings (Net Wt, Net Weight, Net Quantity,
+    Net Qty, Net Content, Net Vol, Net Volume) and tolerates the value being
+    on a separate line from the keyword (OCR often splits label and value).
+    """
+    _UNITS = r"(?:kgs?|kg|gms?|gm|mg|ml|ltrs?|ltr|litres?|g|l|oz|lbs?)"
     match = re.search(
-        r"\b(?:net\s*(?:wt|weight)|n\.?\s*w\.?)\b[^0-9]{0,20}([0-9]+(?:\.[0-9]+)?\s?(?:kg|g|mg|ml|l|oz|lb))\b",
+        r"\bnet\s*(?:wt\.?|weight|qty\.?|quantity|content|vol\.?|volume)"
+        r"[\s\S]{0,60}?"          # non-greedy: cross-line gap, stops at first number
+        r"([0-9]+(?:\.[0-9]+)?\s*" + _UNITS + r")\b",
         text,
         flags=re.I,
     )

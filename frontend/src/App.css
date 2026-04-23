@@ -240,6 +240,14 @@
   text-align: right;
 }
 
+.field-value.field-empty {
+  color: var(--text);
+  opacity: 0.35;
+  font-size: 15px;
+  font-weight: 300;
+  letter-spacing: 0.05em;
+}
+
 .nutrition-table-wrap {
   margin-top: 4px;
   overflow-x: auto;

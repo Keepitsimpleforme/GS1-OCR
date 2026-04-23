@@ -31,7 +31,8 @@ jobs:
           command_timeout: 10m
           script: |
             set -euo pipefail
-            bash /opt/ocr-project/scripts/deploy.sh
+            export APP_DIR="$HOME/ocr-project"
+            bash "$APP_DIR/scripts/deploy.sh"
 
       # ── 3. Quick smoke-test: confirm /health returns 200 ──────────────────
       - name: Health check
