@@ -119,28 +119,48 @@ def _extract_emails(text: str) -> list[str]:
 
 
 def _extract_phones(text: str) -> list[str]:
-    """Extract phone numbers using a strict Indian-mobile pattern only.
+    """Extract contact numbers commonly printed on product labels.
 
-    The old broad fallback matched batch codes, serial numbers, and dates.
-    Now we only accept numbers that look like genuine Indian phone numbers:
-    10-digit numbers starting with 6-9, or +91-prefixed equivalents.
+    Supported patterns:
+    - Toll-free: 1800-208-2663, 1800 208 2663, 18002082663
+    - Mobile: +91 98765 43210, 09876543210, 9876543210
+    - Landline with STD code: 022-23456789, 080 41234567
     """
-    matches = re.findall(
-        r"(?:\+91[\s-]?|0)?[6-9]\d{9}",
-        text,
+    patterns = (
+        # Toll-free numbers (most common on FMCG packs)
+        r"\b1800[\s-]?\d{3,4}[\s-]?\d{3,4}\b",
+        # +91 / 0-prefixed or plain 10-digit Indian mobile
+        r"\b(?:\+91[\s-]?|0)?[6-9]\d{9}\b",
+        # Landline with STD code and subscriber number
+        r"\b0\d{2,4}[\s-]?\d{6,8}\b",
     )
-    cleaned: list[str] = []
+
     seen: set[str] = set()
-    for match in matches:
-        digits = re.sub(r"\D", "", match)
-        # Strip leading country code to normalise
-        if digits.startswith("91") and len(digits) == 12:
-            digits = digits[2:]
-        if len(digits) != 10:
-            continue
-        if digits not in seen:
-            seen.add(digits)
-            cleaned.append(match.strip())
+    cleaned: list[str] = []
+    for pattern in patterns:
+        for match in re.finditer(pattern, text):
+            raw = match.group(0).strip()
+            digits = re.sub(r"\D", "", raw)
+
+            # Canonical keys for de-duplication and validation.
+            canonical: Optional[str] = None
+            if digits.startswith("1800") and len(digits) in {10, 11, 12}:
+                canonical = digits
+            elif digits.startswith("91") and len(digits) == 12 and digits[2] in "6789":
+                canonical = digits[2:]
+            elif len(digits) == 10 and digits[0] in "6789":
+                canonical = digits
+            elif digits.startswith("0") and 9 <= len(digits) <= 12:
+                canonical = digits
+
+            if not canonical:
+                continue
+            if canonical in seen:
+                continue
+
+            seen.add(canonical)
+            cleaned.append(raw)
+
     return cleaned
 
 
@@ -283,17 +303,38 @@ def _pick_gtin_from_barcodes(barcodes: list[str], fssai: Optional[str]) -> Optio
 
 
 def _extract_mrp(text: str) -> Optional[str]:
-    """Extract MRP — only returns a value when the MRP keyword is present.
+    """Extract MRP with OCR-friendly fallbacks.
 
-    The old currency-symbol-only fallback (₹ / Rs.) has been removed because
-    it matched prices on ingredient tables, per-unit costs, etc.
+    Priority:
+    1) Explicit MRP-labelled value (most reliable)
+    2) Currency token + `/-` style (`Re 20/-`, `Rs. 20/-`, `₹20/-`)
+    3) Bare `20/-` fallback (common on Indian labels when OCR drops symbols)
     """
-    match = re.search(
-        r"\bmrp\b[^0-9]{0,40}(?:rs\.?|inr|₹)?\s*([0-9]+(?:\.[0-9]{1,2})?)\s*(?:/-)?",
+    labeled = re.search(
+        r"\b(?:mrp|m\.r\.p\.?)\b[^0-9]{0,40}(?:rs\.?|re\.?|inr|₹)?\s*([0-9]+(?:\.[0-9]{1,2})?)\s*(?:/-)?",
         text,
         flags=re.I,
     )
-    return match.group(1) if match else None
+    if labeled:
+        return labeled.group(1)
+
+    currency_slash = re.search(
+        r"\b(?:rs\.?|re\.?|inr|₹)\s*([0-9]+(?:\.[0-9]{1,2})?)\s*/-",
+        text,
+        flags=re.I,
+    )
+    if currency_slash:
+        return currency_slash.group(1)
+
+    bare_slash = re.search(
+        r"\b([0-9]+(?:\.[0-9]{1,2})?)\s*/-",
+        text,
+        flags=re.I,
+    )
+    if bare_slash:
+        return bare_slash.group(1)
+
+    return None
 
 
 def _extract_net_wt(text: str) -> Optional[str]:
@@ -514,6 +555,27 @@ def _normalize_nutrition(value: Any) -> Optional[str]:
         return _coerce_optional_str(value)
 
 
+def _is_valid_email(value: Optional[str]) -> bool:
+    if not value:
+        return False
+    return bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value))
+
+
+def _is_valid_phone(value: Optional[str]) -> bool:
+    if not value:
+        return False
+    digits = re.sub(r"\D", "", value)
+    if digits.startswith("1800") and len(digits) in {10, 11, 12}:
+        return True
+    if digits.startswith("91") and len(digits) == 12 and digits[2] in "6789":
+        return True
+    if len(digits) == 10 and digits[0] in "6789":
+        return True
+    if digits.startswith("0") and 9 <= len(digits) <= 12:
+        return True
+    return False
+
+
 async def _extract_structured_with_qwen(ocr_text: str) -> dict[str, Any]:
     if not ocr_text.strip():
         return {}
@@ -689,6 +751,30 @@ async def parse_product(file: UploadFile = File(...)) -> dict[str, Any]:
     else:
         gtin_source = "none"
 
+    llm_email = _coerce_optional_str(llm_fields.get("email"))
+    regex_email = regex_fields.get("email")
+    if _is_valid_email(llm_email):
+        merged_email = llm_email
+        email_source = "qwen"
+    elif _is_valid_email(regex_email):
+        merged_email = regex_email
+        email_source = "regex"
+    else:
+        merged_email = None
+        email_source = "none"
+
+    llm_phone = _coerce_optional_str(llm_fields.get("phone"))
+    regex_phone = regex_fields.get("phone")
+    if _is_valid_phone(llm_phone):
+        merged_phone = llm_phone
+        phone_source = "qwen"
+    elif _is_valid_phone(regex_phone):
+        merged_phone = regex_phone
+        phone_source = "regex"
+    else:
+        merged_phone = None
+        phone_source = "none"
+
     fields: dict[str, Optional[str]] = {
         "gtin": merged_gtin,
         "fssai": llm_fssai or regex_fields.get("fssai"),
@@ -696,8 +782,8 @@ async def parse_product(file: UploadFile = File(...)) -> dict[str, Any]:
         "net_wt": _coerce_optional_str(llm_fields.get("net_weight")) or regex_fields.get("net_wt"),
         "ingredients": _normalize_ingredients(llm_fields.get("ingredients")) or regex_fields.get("ingredients"),
         "nutritional": _normalize_nutrition(llm_fields.get("nutrition")) or regex_fields.get("nutritional"),
-        "email": _coerce_optional_str(llm_fields.get("email")) or regex_fields.get("email"),
-        "phone": regex_fields.get("phone"),
+        "email": merged_email,
+        "phone": merged_phone,
     }
 
     result: dict[str, Any] = {
@@ -709,7 +795,9 @@ async def parse_product(file: UploadFile = File(...)) -> dict[str, Any]:
         "ingredients":               fields.get("ingredients"),
         "nutrition":                 fields.get("nutritional"),
         "email":                     fields.get("email"),
+        "email_source":              email_source,
         "phone":                     fields.get("phone"),
+        "phone_source":              phone_source,
         "barcode_decoder_available": BARCODE_LIB_AVAILABLE,
         "validation":                _validate_fields(fields),
         "extract_model":             EXTRACT_MODEL,
