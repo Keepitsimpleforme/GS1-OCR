@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import os
 import re
 import tempfile
@@ -21,7 +22,11 @@ except Exception:
     zbar_decode = None  # type: ignore[assignment]
     BARCODE_LIB_AVAILABLE: Final = False
 
-MODEL: Final = os.getenv("OLLAMA_MODEL", "maternion/LightOnOCR-2")
+OCR_MODEL: Final = os.getenv(
+    "OLLAMA_MODEL_OCR",
+    os.getenv("OLLAMA_MODEL", "maternion/LightOnOCR-2"),
+)
+EXTRACT_MODEL: Final = os.getenv("OLLAMA_MODEL_EXTRACT", "qwen2.5:7b")
 MAX_BYTES: Final = int(os.getenv("MAX_UPLOAD_MB", "20")) * 1024 * 1024
 OLLAMA_TIMEOUT_SECONDS: Final = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "180"))
 OLLAMA_HEALTH_TIMEOUT_SECONDS: Final = float(
@@ -35,6 +40,29 @@ PROMPT: Final = os.getenv(
     "OCR_PROMPT",
     "Transcribe the text in this image exactly as it appears.",
 )
+EXTRACTION_PROMPT: Final = """You are extracting structured data from raw OCR text of an Indian food product label.
+
+OCR text can be noisy. Return ONLY valid JSON with this exact schema:
+{
+  "mrp": "45.00" or null,
+  "net_weight": "200g" or null,
+  "fssai_lic_no": "12345678901234" or null,
+  "gtin": "8901234567890" or null,
+  "email": "support@brand.com" or null,
+  "ingredients": ["ingredient1", "ingredient2"] or null,
+  "nutrition": [{"name":"Energy","per_100g":"350 kcal","per_serving":"175 kcal","unit":"kcal"}] or null
+}
+
+Rules:
+- If unsure, return null and never guess.
+- fssai_lic_no must contain only 14 digits.
+- Keep mrp numeric only (no currency symbol).
+- Do not include markdown.
+- Do not include any keys other than the schema above.
+
+OCR TEXT:
+{ocr_text}
+"""
 _cors = os.getenv("CORS_ORIGINS", "http://localhost:5173")
 CORS_ORIGINS: Final[list[str]] = [o.strip() for o in _cors.split(",") if o.strip()]
 
@@ -66,7 +94,12 @@ async def health() -> dict:
             status_code=503,
             detail=f"Ollama unreachable: {e}",
         ) from e
-    return {"status": "ok", "ollama": "reachable", "model": MODEL}
+    return {
+        "status": "ok",
+        "ollama": "reachable",
+        "ocr_model": OCR_MODEL,
+        "extract_model": EXTRACT_MODEL,
+    }
 
 
 def _normalize_space(value: str) -> str:
@@ -417,7 +450,7 @@ async def _extract_text_from_bytes(body: bytes, file_name: str) -> str:
             response = await asyncio.wait_for(
                 asyncio.to_thread(
                     ollama.generate,
-                    model=MODEL,
+                    model=OCR_MODEL,
                     prompt=PROMPT,
                     images=[tmp_path],
                 ),
@@ -446,13 +479,74 @@ async def _extract_text_from_bytes(body: bytes, file_name: str) -> str:
     return response.get("response", "")
 
 
+def _strip_code_fences(value: str) -> str:
+    cleaned = value.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    return cleaned.strip()
+
+
+def _coerce_optional_str(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _normalize_ingredients(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        parts = [str(item).strip() for item in value if str(item).strip()]
+        return ", ".join(parts) if parts else None
+    return _coerce_optional_str(value)
+
+
+def _normalize_nutrition(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return _coerce_optional_str(value)
+    try:
+        return json.dumps(value, ensure_ascii=True)
+    except Exception:
+        return _coerce_optional_str(value)
+
+
+async def _extract_structured_with_qwen(ocr_text: str) -> dict[str, Any]:
+    if not ocr_text.strip():
+        return {}
+    prompt = EXTRACTION_PROMPT.format(ocr_text=ocr_text)
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                ollama.generate,
+                model=EXTRACT_MODEL,
+                prompt=prompt,
+                format="json",
+                options={
+                    "temperature": 0,
+                    "top_p": 1,
+                    "num_predict": 1500,
+                },
+            ),
+            timeout=OLLAMA_TIMEOUT_SECONDS,
+        )
+        raw = _strip_code_fences(str(response.get("response", "{}")))
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
 @app.post("/api/extract")
 async def extract(file: UploadFile = File(...)) -> dict[str, Any]:
     body = await file.read()
     _validate_image_file(file, body)
 
     text = await _extract_text_from_bytes(body, file.filename or "")
-    return {"text": text, "model": MODEL}
+    return {"text": text, "model": OCR_MODEL}
 
 
 @app.post("/api/extract/product-info")
@@ -474,7 +568,7 @@ async def extract_product_info(file: UploadFile = File(...)) -> dict[str, Any]:
             "gtin": barcode_gtin,
         },
         "text": text,
-        "model": MODEL,
+        "model": OCR_MODEL,
     }
 
 
@@ -571,11 +665,44 @@ async def parse_product(file: UploadFile = File(...)) -> dict[str, Any]:
 
     fssai = _extract_fssai(text)
     barcode_gtin = _pick_gtin_from_barcodes(barcodes, fssai)
-    fields = _extract_product_fields(text, barcode_gtin=barcode_gtin)
+    regex_fields = _extract_product_fields(text, barcode_gtin=barcode_gtin)
+    llm_fields = await _extract_structured_with_qwen(text)
+
+    llm_fssai = re.sub(r"\D", "", str(llm_fields.get("fssai_lic_no") or ""))
+    if len(llm_fssai) != 14:
+        llm_fssai = ""
+
+    llm_gtin_raw = _coerce_optional_str(llm_fields.get("gtin"))
+    llm_gtin = None
+    if llm_gtin_raw:
+        llm_digits = re.sub(r"\D", "", llm_gtin_raw)
+        if _is_valid_gtin(llm_digits, llm_fssai or fssai):
+            llm_gtin = llm_digits
+
+    merged_gtin = barcode_gtin or llm_gtin or regex_fields.get("gtin")
+    if barcode_gtin:
+        gtin_source = "barcode"
+    elif llm_gtin:
+        gtin_source = "qwen"
+    elif regex_fields.get("gtin"):
+        gtin_source = "ocr"
+    else:
+        gtin_source = "none"
+
+    fields: dict[str, Optional[str]] = {
+        "gtin": merged_gtin,
+        "fssai": llm_fssai or regex_fields.get("fssai"),
+        "mrp": _coerce_optional_str(llm_fields.get("mrp")) or regex_fields.get("mrp"),
+        "net_wt": _coerce_optional_str(llm_fields.get("net_weight")) or regex_fields.get("net_wt"),
+        "ingredients": _normalize_ingredients(llm_fields.get("ingredients")) or regex_fields.get("ingredients"),
+        "nutritional": _normalize_nutrition(llm_fields.get("nutrition")) or regex_fields.get("nutritional"),
+        "email": _coerce_optional_str(llm_fields.get("email")) or regex_fields.get("email"),
+        "phone": regex_fields.get("phone"),
+    }
 
     result: dict[str, Any] = {
         "gtin":                      fields.get("gtin"),
-        "gtin_source":               fields.get("gtin_source", "none"),
+        "gtin_source":               gtin_source,
         "fssai":                     fields.get("fssai"),
         "mrp":                       fields.get("mrp"),
         "net_weight":                fields.get("net_wt"),
@@ -585,6 +712,7 @@ async def parse_product(file: UploadFile = File(...)) -> dict[str, Any]:
         "phone":                     fields.get("phone"),
         "barcode_decoder_available": BARCODE_LIB_AVAILABLE,
         "validation":                _validate_fields(fields),
+        "extract_model":             EXTRACT_MODEL,
     }
     return result
 
