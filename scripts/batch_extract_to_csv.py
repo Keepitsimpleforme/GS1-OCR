@@ -40,8 +40,17 @@ MIME_BY_EXT = {
 def _iter_images(root: Path) -> list[Path]:
     files: list[Path] = []
     for path in root.rglob("*"):
-        if path.is_file() and path.suffix.lower() in IMAGE_EXTS:
-            files.append(path)
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in IMAGE_EXTS:
+            continue
+        rel_parts = path.relative_to(root).parts
+        # Skip macOS metadata folders/files from ZIP exports.
+        if "__MACOSX" in rel_parts:
+            continue
+        if path.name.startswith("._"):
+            continue
+        files.append(path)
     return sorted(files)
 
 
