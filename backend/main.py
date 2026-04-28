@@ -128,7 +128,7 @@ def _extract_phones(text: str) -> list[str]:
     """
     patterns = (
         # Toll-free numbers (most common on FMCG packs)
-        r"\b1800[\s-]?\d{3,4}[\s-]?\d{3,4}\b",
+        r"\b(?:1800|1[\s-]?800)(?:[\s-]?\d{1,4}){2,4}\b",
         # +91 / 0-prefixed or plain 10-digit Indian mobile
         r"\b(?:\+91[\s-]?|0)?[6-9]\d{9}\b",
         # Landline with STD code and subscriber number
@@ -144,8 +144,11 @@ def _extract_phones(text: str) -> list[str]:
 
             # Canonical keys for de-duplication and validation.
             canonical: Optional[str] = None
-            if digits.startswith("1800") and len(digits) in {10, 11, 12}:
+            if digits.startswith("1800") and 8 <= len(digits) <= 12:
                 canonical = digits
+            elif digits.startswith("800") and 7 <= len(digits) <= 11:
+                # Handles forms like "1-800-10-22-221" where separators drop the leading 1.
+                canonical = f"1{digits}"
             elif digits.startswith("91") and len(digits) == 12 and digits[2] in "6789":
                 canonical = digits[2:]
             elif len(digits) == 10 and digits[0] in "6789":
