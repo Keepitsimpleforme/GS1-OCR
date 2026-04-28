@@ -28,6 +28,13 @@ from typing import Any
 import requests
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+MIME_BY_EXT = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
 
 
 def _iter_images(root: Path) -> list[Path]:
@@ -47,8 +54,9 @@ def _as_json_cell(value: Any) -> str:
 
 
 def _extract_one(image_path: Path, api_url: str, timeout_sec: int) -> tuple[dict[str, Any], str]:
+    mime = MIME_BY_EXT.get(image_path.suffix.lower(), "application/octet-stream")
     with image_path.open("rb") as f:
-        files = {"file": (image_path.name, f, "application/octet-stream")}
+        files = {"file": (image_path.name, f, mime)}
         resp = requests.post(api_url, files=files, timeout=timeout_sec)
 
     if not resp.ok:
