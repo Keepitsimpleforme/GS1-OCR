@@ -28,7 +28,7 @@ OCR_MODEL: Final = os.getenv(
 )
 EXTRACT_MODEL: Final = os.getenv("OLLAMA_MODEL_EXTRACT", "qwen2.5:7b")
 MAX_BYTES: Final = int(os.getenv("MAX_UPLOAD_MB", "20")) * 1024 * 1024
-OLLAMA_TIMEOUT_SECONDS: Final = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "180"))
+OLLAMA_TIMEOUT_SECONDS: Final = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "240"))
 OLLAMA_HEALTH_TIMEOUT_SECONDS: Final = float(
     os.getenv("OLLAMA_HEALTH_TIMEOUT_SECONDS", "5")
 )

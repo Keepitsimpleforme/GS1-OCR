@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm'
 import './App.css'
 
 const ACCEPT = 'image/jpeg,image/png,image/webp,image/gif'
-const REQUEST_TIMEOUT_MS = 45000
+const REQUEST_TIMEOUT_MS = Number(import.meta.env.VITE_REQUEST_TIMEOUT_MS ?? 180000)
 const HEALTH_TIMEOUT_MS = 7000
 const SLOW_NOTICE_MS = 12000
 const FIELD_CONFIG = [
