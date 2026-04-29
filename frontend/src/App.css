@@ -195,9 +195,8 @@
 
 .field-list {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 0.7fr));
-  justify-content: space-between;
-  gap: 4px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
 @media (max-width: 1100px) {
@@ -210,20 +209,34 @@
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg);
-  padding: 4px 6px;
+  padding: 6px 8px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-height: 42px;
 }
 
 .field-row-stacked {
   display: block;
 }
 
+.field-row-large {
+  min-height: 320px;
+}
+
+.field-row-stacked .field-label {
+  display: block;
+  margin-bottom: 8px;
+}
+
+.field-row-stacked .field-value {
+  width: 100%;
+}
+
 .field-label {
   margin: 0;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
   text-transform: uppercase;
@@ -235,9 +248,14 @@
   margin: 0;
   color: var(--text-h);
   line-height: 1.35;
-  font-size: 13px;
+  font-size: 14px;
   word-break: break-word;
   text-align: right;
+}
+
+.field-row-large .field-value {
+  text-align: left;
+  margin-top: 10px;
 }
 
 .field-value.field-empty {
@@ -249,7 +267,7 @@
 }
 
 .nutrition-table-wrap {
-  margin-top: 4px;
+  margin-top: 8px;
   overflow-x: auto;
 }
 

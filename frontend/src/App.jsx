@@ -296,9 +296,10 @@ function App() {
                     .map((key) => fields[key])
                     .find((entry) => entry !== null && entry !== undefined && entry !== '') ?? null
                 const hasNutritionTable = field.label === 'Nutritional' && tableRows
+                const isLargePanel = field.label === 'Nutritional' || field.label === 'Ingredients'
                 return (
                   <div
-                    className={`field-row ${hasNutritionTable ? 'field-row-stacked' : ''}`}
+                    className={`field-row ${isLargePanel ? 'field-row-stacked field-row-large' : ''}`}
                     key={field.label}
                   >
                     <p className="field-label">{field.label}</p>
