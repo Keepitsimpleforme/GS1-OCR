@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import time
 import os
 import re
 import tempfile
@@ -33,6 +34,7 @@ OLLAMA_HEALTH_TIMEOUT_SECONDS: Final = float(
     os.getenv("OLLAMA_HEALTH_TIMEOUT_SECONDS", "5")
 )
 BARCODE_TIMEOUT_SECONDS: Final = float(os.getenv("BARCODE_TIMEOUT_SECONDS", "5"))
+EXTRACT_NUM_PREDICT: Final = int(os.getenv("EXTRACT_NUM_PREDICT", "600"))
 ALLOWED_TYPES: Final = frozenset(
     {"image/jpeg", "image/png", "image/webp", "image/gif"}
 )
@@ -43,7 +45,7 @@ PROMPT: Final = os.getenv(
 EXTRACTION_PROMPT: Final = """You are extracting structured data from raw OCR text of an Indian food product label.
 
 OCR text can be noisy. Return ONLY valid JSON with this exact schema:
-{
+{{
   "mrp": "45.00" or null,
   "net_weight": "200g" or null,
   "fssai_lic_no": "12345678901234" or null,
@@ -51,7 +53,7 @@ OCR text can be noisy. Return ONLY valid JSON with this exact schema:
   "email": "support@brand.com" or null,
   "ingredients": ["ingredient1", "ingredient2"] or null,
   "nutrition": [{"name":"Energy","per_100g":"350 kcal","per_serving":"175 kcal","unit":"kcal"}] or null
-}
+}}
 
 Rules:
 - If unsure, return null and never guess.
@@ -593,7 +595,7 @@ async def _extract_structured_with_qwen(ocr_text: str) -> dict[str, Any]:
                 options={
                     "temperature": 0,
                     "top_p": 1,
-                    "num_predict": 1500,
+                    "num_predict": EXTRACT_NUM_PREDICT,
                 },
             ),
             timeout=OLLAMA_TIMEOUT_SECONDS,
@@ -722,16 +724,26 @@ async def parse_product(file: UploadFile = File(...)) -> dict[str, Any]:
     barcode_decoder_available : Whether pyzbar/zbar is installed on this server
     validation      : { fssai_valid, mrp_valid, errors }
     """
+    request_started = time.perf_counter()
+    timing: dict[str, float] = {}
+
     body = await file.read()
     _validate_image_file(file, body)
 
+    t0 = time.perf_counter()
     barcodes = await _decode_barcodes_with_timeout(body)
-    text = await _extract_text_from_bytes(body, file.filename or "")
+    timing["barcode_sec"] = round(time.perf_counter() - t0, 3)
 
+    t0 = time.perf_counter()
+    text = await _extract_text_from_bytes(body, file.filename or "")
+    timing["ocr_sec"] = round(time.perf_counter() - t0, 3)
+
+    t0 = time.perf_counter()
     fssai = _extract_fssai(text)
     barcode_gtin = _pick_gtin_from_barcodes(barcodes, fssai)
     regex_fields = _extract_product_fields(text, barcode_gtin=barcode_gtin)
     llm_fields = await _extract_structured_with_qwen(text)
+    timing["qwen_sec"] = round(time.perf_counter() - t0, 3)
 
     llm_fssai = re.sub(r"\D", "", str(llm_fields.get("fssai_lic_no") or ""))
     if len(llm_fssai) != 14:
@@ -804,6 +816,8 @@ async def parse_product(file: UploadFile = File(...)) -> dict[str, Any]:
         "barcode_decoder_available": BARCODE_LIB_AVAILABLE,
         "validation":                _validate_fields(fields),
         "extract_model":             EXTRACT_MODEL,
+        "timing":                    timing,
     }
+    timing["total_sec"] = round(time.perf_counter() - request_started, 3)
     return result
 
