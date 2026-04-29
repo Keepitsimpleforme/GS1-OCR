@@ -331,6 +331,15 @@ def _extract_mrp(text: str) -> Optional[str]:
     if currency_slash:
         return currency_slash.group(1)
 
+    # Common OCR output: plain "Rs. 80.00" without "/-".
+    currency_plain = re.search(
+        r"\b(?:rs\.?|re\.?|inr|₹)\s*([0-9]+(?:\.[0-9]{1,2})?)\b",
+        text,
+        flags=re.I,
+    )
+    if currency_plain:
+        return currency_plain.group(1)
+
     bare_slash = re.search(
         r"\b([0-9]+(?:\.[0-9]{1,2})?)\s*/-",
         text,
