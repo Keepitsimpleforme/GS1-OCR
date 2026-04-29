@@ -406,6 +406,71 @@ def _extract_section(
     return section or None
 
 
+def _extract_ingredients_precise(text: str) -> Optional[str]:
+    """Extract ingredients with stronger stop rules to avoid tail noise."""
+    lines = [line.strip() for line in text.splitlines()]
+    if not lines:
+        return None
+
+    start_idx = -1
+    first_value = ""
+    for idx, line in enumerate(lines):
+        match = re.search(r"\bingredients?\b\s*:?\s*(.*)$", line, flags=re.I)
+        if match:
+            start_idx = idx
+            first_value = match.group(1).strip()
+            break
+    if start_idx == -1:
+        return None
+
+    stop_pattern = re.compile(
+        r"\b("
+        r"nutrition|nutritional|fssai|mrp|net\s*(?:qty|wt|weight|quantity|content)|"
+        r"batch|b\.?\s*no|mfd|mfg|pkd|packed|best\s*before|barcode|"
+        r"customer\s*care|email|website|phone|helpline|imported|manufactured|marketed|"
+        r"see\s+.*panel|image\s+on\s+the\s+front|cut\s+here|gst"
+        r")\b",
+        flags=re.I,
+    )
+
+    collected: list[str] = []
+    if first_value:
+        collected.append(first_value)
+
+    for line in lines[start_idx + 1 :]:
+        lowered = line.lower()
+        if stop_pattern.search(lowered):
+            break
+        if not line:
+            continue
+        # Skip barcode-like / code-only lines.
+        if re.fullmatch(r"[\d\s\-]{6,}", line):
+            break
+        if line.startswith("---"):
+            break
+        collected.append(line)
+        if len(collected) >= 16:
+            break
+
+    joined = _normalize_space(" ".join(collected))
+    if not joined:
+        return None
+
+    # Handle OCR where section repeats "INGREDIENTS:" multiple times.
+    parts = [p.strip(" ,;:-") for p in re.split(r"\bingredients?\s*:?\s*", joined, flags=re.I) if p.strip()]
+    if parts:
+        joined = max(parts, key=len)
+
+    # Hard-trim marketing/footer spillovers if they slipped in same line.
+    joined = re.split(
+        r"\b(?:image on the front|see (?:centre|center) panel|best before|batch|mrp|net qty|barcode)\b",
+        joined,
+        maxsplit=1,
+        flags=re.I,
+    )[0].strip(" ,;:-")
+    return joined or None
+
+
 def _extract_html_table(text: str) -> Optional[str]:
     match = re.search(r"<table\b[\s\S]*?</table>", text, flags=re.I)
     if not match:
@@ -444,7 +509,7 @@ def _extract_product_fields(
             "serving suggestion",
         ),
     )
-    ingredients = _extract_section(
+    ingredients = _extract_ingredients_precise(text) or _extract_section(
         text=text,
         start_keywords=("ingredients", "ingredient"),
         stop_keywords=(
