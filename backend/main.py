@@ -55,7 +55,7 @@ OCR text can be noisy. Return ONLY valid JSON with this exact schema:
   "gtin": "8901234567890" or null,
   "email": "support@brand.com" or null,
   "ingredients": ["ingredient1", "ingredient2"] or null,
-  "nutrition": [{"name":"Energy","per_100g":"350 kcal","per_serving":"175 kcal","unit":"kcal"}] or null
+  "nutrition": [{{"name":"Energy","per_100g":"350 kcal","per_serving":"175 kcal","unit":"kcal"}}] or null
 }}
 
 Rules:
