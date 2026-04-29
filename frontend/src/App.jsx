@@ -8,12 +8,15 @@ const REQUEST_TIMEOUT_MS = Number(import.meta.env.VITE_REQUEST_TIMEOUT_MS ?? 420
 const HEALTH_TIMEOUT_MS = 7000
 const SLOW_NOTICE_MS = 12000
 const FIELD_CONFIG = [
+  { label: 'Brand', keys: ['brand_name'] },
+  { label: 'Product', keys: ['product_name'] },
   { label: 'MRP', keys: ['mrp'] },
   { label: 'GTIN', keys: ['gtin', 'GTIN'] },
   { label: 'FSSAI', keys: ['fssai'] },
   { label: 'Email', keys: ['email'] },
   { label: 'Phone', keys: ['phone'] },
-  { label: 'Net Wt', keys: ['net_wt'] },
+  { label: 'Best Before', keys: ['best_before'] },
+  { label: 'Net Wt', keys: ['net_wt', 'net_weight'] },
   { label: 'Nutritional', keys: ['nutritional', 'nutritable'] },
   { label: 'Ingredients', keys: ['ingredients'] },
 ]

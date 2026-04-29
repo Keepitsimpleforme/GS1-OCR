@@ -46,8 +46,11 @@ EXTRACTION_PROMPT: Final = """You are extracting structured data from raw OCR te
 
 OCR text can be noisy. Return ONLY valid JSON with this exact schema:
 {{
+  "brand_name": "Haldiram's" or null,
+  "product_name": "Delhi Mix" or null,
   "mrp": "45.00" or null,
   "net_weight": "200g" or null,
+  "best_before": "06/09/2015" or null,
   "fssai_lic_no": "12345678901234" or null,
   "gtin": "8901234567890" or null,
   "email": "support@brand.com" or null,
@@ -371,6 +374,57 @@ def _extract_net_wt(text: str) -> Optional[str]:
     return None
 
 
+def _extract_best_before(text: str) -> Optional[str]:
+    match = re.search(
+        r"\bbest\s*before\b[^A-Z0-9]{0,20}([A-Z0-9][A-Z0-9\s:/\-]{2,30})",
+        text,
+        flags=re.I,
+    )
+    if not match:
+        return None
+    value = _normalize_space(match.group(1))
+    value = re.split(r"\b(?:batch|mfg|mrp|net)\b", value, maxsplit=1, flags=re.I)[0].strip(" ,;:-")
+    return value or None
+
+
+def _extract_brand_product(text: str) -> tuple[Optional[str], Optional[str]]:
+    lines = [_normalize_space(line) for line in text.splitlines() if _normalize_space(line)]
+    if not lines:
+        return None, None
+
+    skip = (
+        "nutritional",
+        "nutrition",
+        "ingredients",
+        "fssai",
+        "barcode",
+        "mrp",
+        "best before",
+        "net wt",
+        "net qty",
+    )
+    candidates: list[str] = []
+    for line in lines[:30]:
+        low = line.lower()
+        if any(word in low for word in skip):
+            continue
+        if len(line) < 3 or len(line) > 60:
+            continue
+        if re.fullmatch(r"[\d\s\-/.:]+", line):
+            continue
+        candidates.append(line)
+        if len(candidates) >= 6:
+            break
+
+    brand = candidates[0] if candidates else None
+    product = None
+    for line in candidates[1:]:
+        if line != brand:
+            product = line
+            break
+    return brand, product
+
+
 def _extract_section(
     text: str,
     start_keywords: tuple[str, ...],
@@ -488,6 +542,7 @@ def _extract_product_fields(
     table_html = _extract_html_table(text)
     gtin_from_text = _extract_gtin(text, fssai)
     gtin = barcode_gtin or gtin_from_text
+    brand_name, product_name = _extract_brand_product(text)
 
     nutritional = table_html or _extract_section(
         text=text,
@@ -534,6 +589,9 @@ def _extract_product_fields(
         "email": emails[0] if emails else None,
         "phone": phones[0] if phones else None,
         "net_wt": _extract_net_wt(text),
+        "best_before": _extract_best_before(text),
+        "brand_name": brand_name,
+        "product_name": product_name,
         "nutritional": nutritional,
         "nutritable": nutritional,
         "ingredients": ingredients,
@@ -700,6 +758,10 @@ async def extract_product_info(file: UploadFile = File(...)) -> dict[str, Any]:
     fssai = _extract_fssai(text)
     barcode_gtin = _pick_gtin_from_barcodes(barcodes, fssai)
     fields = _extract_product_fields(text, barcode_gtin=barcode_gtin)
+    llm_fields = await _extract_structured_with_qwen(text)
+    fields["brand_name"] = _coerce_optional_str(llm_fields.get("brand_name")) or fields.get("brand_name")
+    fields["product_name"] = _coerce_optional_str(llm_fields.get("product_name")) or fields.get("product_name")
+    fields["best_before"] = _coerce_optional_str(llm_fields.get("best_before")) or fields.get("best_before")
 
     return {
         "fields": fields,
@@ -864,6 +926,42 @@ async def parse_product(file: UploadFile = File(...)) -> dict[str, Any]:
         merged_phone = None
         phone_source = "none"
 
+    llm_brand_name = _coerce_optional_str(llm_fields.get("brand_name"))
+    regex_brand_name = regex_fields.get("brand_name")
+    if llm_brand_name:
+        merged_brand_name = llm_brand_name
+        brand_name_source = "qwen"
+    elif regex_brand_name:
+        merged_brand_name = regex_brand_name
+        brand_name_source = "regex"
+    else:
+        merged_brand_name = None
+        brand_name_source = "none"
+
+    llm_product_name = _coerce_optional_str(llm_fields.get("product_name"))
+    regex_product_name = regex_fields.get("product_name")
+    if llm_product_name:
+        merged_product_name = llm_product_name
+        product_name_source = "qwen"
+    elif regex_product_name:
+        merged_product_name = regex_product_name
+        product_name_source = "regex"
+    else:
+        merged_product_name = None
+        product_name_source = "none"
+
+    llm_best_before = _coerce_optional_str(llm_fields.get("best_before"))
+    regex_best_before = regex_fields.get("best_before")
+    if llm_best_before:
+        merged_best_before = llm_best_before
+        best_before_source = "qwen"
+    elif regex_best_before:
+        merged_best_before = regex_best_before
+        best_before_source = "regex"
+    else:
+        merged_best_before = None
+        best_before_source = "none"
+
     fields: dict[str, Optional[str]] = {
         "gtin": merged_gtin,
         "fssai": llm_fssai or regex_fields.get("fssai"),
@@ -873,6 +971,9 @@ async def parse_product(file: UploadFile = File(...)) -> dict[str, Any]:
         "nutritional": _normalize_nutrition(llm_fields.get("nutrition")) or regex_fields.get("nutritional"),
         "email": merged_email,
         "phone": merged_phone,
+        "best_before": merged_best_before,
+        "brand_name": merged_brand_name,
+        "product_name": merged_product_name,
     }
 
     result: dict[str, Any] = {
@@ -887,6 +988,12 @@ async def parse_product(file: UploadFile = File(...)) -> dict[str, Any]:
         "email_source":              email_source,
         "phone":                     fields.get("phone"),
         "phone_source":              phone_source,
+        "best_before":               fields.get("best_before"),
+        "best_before_source":        best_before_source,
+        "brand_name":                fields.get("brand_name"),
+        "brand_name_source":         brand_name_source,
+        "product_name":              fields.get("product_name"),
+        "product_name_source":       product_name_source,
         "barcode_decoder_available": BARCODE_LIB_AVAILABLE,
         "validation":                _validate_fields(fields),
         "extract_model":             EXTRACT_MODEL,
