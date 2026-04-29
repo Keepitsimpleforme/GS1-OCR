@@ -839,6 +839,159 @@ def _validate_fields(fields: dict[str, Optional[str]]) -> dict[str, Any]:
     }
 
 
+def _listify(value: Optional[str]) -> list[str]:
+    cleaned = _coerce_optional_str(value)
+    return [cleaned] if cleaned else []
+
+
+def _sanity_score(text: str) -> float:
+    # Lightweight proxy score (0-100) based on OCR text richness.
+    words = re.findall(r"\b\w+\b", text)
+    unique_ratio = (len(set(w.lower() for w in words)) / len(words)) if words else 0.0
+    length_factor = min(len(words) / 80.0, 1.0)
+    score = max(0.0, min(100.0, (0.65 * unique_ratio + 0.35 * length_factor) * 100.0))
+    return round(score, 2)
+
+
+@app.post("/front")
+async def legacy_front(front: UploadFile = File(...)) -> dict[str, Any]:
+    request_start = time.perf_counter()
+    body = await front.read()
+    _validate_image_file(front, body)
+
+    t0 = time.perf_counter()
+    text = await _extract_text_from_bytes(body, front.filename or "")
+    pre_process = time.perf_counter() - t0
+    brand_name, product_name = _extract_brand_product(text)
+
+    total = time.perf_counter() - request_start
+    return {
+        "front": {
+            "brand_name": brand_name or "",
+            "product_name": product_name or "",
+        },
+        "sanity_check": {"front": _sanity_score(text)},
+        "filename": {"front": os.path.basename(front.filename or "")},
+        "time": {
+            "pre_process": round(pre_process, 3),
+            "post_process": round(max(0.0, total - pre_process), 3),
+            "total_time": round(total, 3),
+        },
+    }
+
+
+@app.post("/back")
+async def legacy_back(back: UploadFile = File(...)) -> dict[str, Any]:
+    request_start = time.perf_counter()
+    body = await back.read()
+    _validate_image_file(back, body)
+
+    t0 = time.perf_counter()
+    barcodes = await _decode_barcodes_with_timeout(body)
+    barcode_time = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    text = await _extract_text_from_bytes(body, back.filename or "")
+    ocr_time = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    fssai = _extract_fssai(text)
+    barcode_gtin = _pick_gtin_from_barcodes(barcodes, fssai)
+    fields = _extract_product_fields(text, barcode_gtin=barcode_gtin)
+    regex_time = time.perf_counter() - t0
+
+    back_result = {
+        "phone": _listify(fields.get("phone")),
+        "mail": _listify(fields.get("email")),
+        "fssai": _listify(fields.get("fssai")),
+        "GTIN": _listify(fields.get("gtin")),
+        "netwt": _listify(fields.get("net_wt")),
+        "best_before": _listify(fields.get("best_before")),
+        "mrp": _listify(fields.get("mrp")),
+        "ingredients": _listify(fields.get("ingredients")),
+        "nutri_table": _listify(fields.get("nutritional")),
+    }
+
+    flags = {
+        "phone": "From regex" if back_result["phone"] else "Not found",
+        "mail": "From regex" if back_result["mail"] else "Not found",
+        "fssai": "From regex" if back_result["fssai"] else "Not found",
+        "GTIN": "From barcode/ocr" if back_result["GTIN"] else "Not found",
+        "netwt": "From regex" if back_result["netwt"] else "Not found",
+        "best_before": "From regex" if back_result["best_before"] else "Not found",
+        "mrp": "From regex" if back_result["mrp"] else "Not found",
+    }
+
+    total = time.perf_counter() - request_start
+    return {
+        "result": {"back": back_result},
+        "flags": flags,
+        "time": {
+            "barcode": round(barcode_time, 3),
+            "pre_process": round(barcode_time + ocr_time, 3),
+            "regex": round(regex_time, 3),
+            "post_process": round(regex_time, 3),
+            "total_time": round(total, 3),
+        },
+        "filename": os.path.basename(back.filename or ""),
+        "sanity_check": {"back": _sanity_score(text)},
+    }
+
+
+@app.post("/ingredients")
+async def legacy_ingredients(ingredients: UploadFile = File(...)) -> dict[str, Any]:
+    request_start = time.perf_counter()
+    body = await ingredients.read()
+    _validate_image_file(ingredients, body)
+
+    t0 = time.perf_counter()
+    text = await _extract_text_from_bytes(body, ingredients.filename or "")
+    pre_process = time.perf_counter() - t0
+    extracted = _extract_ingredients_precise(text)
+
+    total = time.perf_counter() - request_start
+    key = "ingredients"
+    return {
+        "url": {key: ""},
+        "filename": {key: os.path.basename(ingredients.filename or "")},
+        "sanity_check": {key: _sanity_score(text)},
+        "result": {key: text},
+        "time": {
+            "pre_process": round(pre_process, 3),
+            "post_process": round(max(0.0, total - pre_process), 3),
+            "total_time": round(total, 3),
+        },
+        "Ingredients": extracted or "",
+    }
+
+
+@app.post("/nutritional")
+async def legacy_nutritional(nutritional: UploadFile = File(...)) -> dict[str, Any]:
+    request_start = time.perf_counter()
+    body = await nutritional.read()
+    _validate_image_file(nutritional, body)
+
+    t0 = time.perf_counter()
+    text = await _extract_text_from_bytes(body, nutritional.filename or "")
+    pre_process = time.perf_counter() - t0
+    fields = _extract_product_fields(text)
+
+    total = time.perf_counter() - request_start
+    key = "nutritional"
+    return {
+        "url": {key: ""},
+        "filename": {key: os.path.basename(nutritional.filename or "")},
+        "sanity_check": {key: _sanity_score(text)},
+        "result": {key: text},
+        "time": {
+            "pre_process": round(pre_process, 3),
+            "post_process": round(max(0.0, total - pre_process), 3),
+            "total_time": round(total, 3),
+        },
+        "Nutritional Content": fields.get("nutritional") or "",
+    }
+
+
 @app.post("/api/parse")
 async def parse_product(file: UploadFile = File(...)) -> dict[str, Any]:
     """
