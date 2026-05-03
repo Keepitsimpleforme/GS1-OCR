@@ -4,14 +4,17 @@ Batch-test images via /api/parse and export structured results to CSV.
 
 Usage:
   python scripts/batch_extract_to_csv.py \
-    --zip /path/to/images.zip \
+    --dir /path/to/images \
     --api http://20.204.169.52/api/parse \
     --out /path/to/results.csv
 
+Defaults (suitable for large batch / strict timeout tests):
+  --timeout 40   (no retry window beyond one request)
+  --retries 0
+
 Notes:
-  - Non-invasive: does not modify backend/frontend code.
-  - CSV opens directly in Excel/Google Sheets.
-  - One row per image, image name as first column.
+  - CSV contains only extracted business fields + image_name + elapsed_sec.
+  - No raw OCR text, no status/error/attempts, no *_source, no model/validation columns.
   - Summary metrics are written at the top; full results follow after a blank line.
 """
 
@@ -37,28 +40,22 @@ MIME_BY_EXT = {
     ".gif": "image/gif",
 }
 
+# Only required output columns (no status, error, attempts, *_source, extract_model, validation).
 FIELDNAMES = [
     "image_name",
-    "status",
-    "error",
-    "attempts",
     "elapsed_sec",
     "gtin",
-    "gtin_source",
     "fssai",
     "mrp",
     "net_weight",
     "ingredients",
     "nutrition",
     "email",
-    "email_source",
     "phone",
-    "phone_source",
     "barcode_decoder_available",
-    "extract_model",
-    "fssai_valid",
-    "mrp_valid",
-    "validation_errors",
+    "brand_name",
+    "product_name",
+    "best_before",
 ]
 
 
@@ -129,10 +126,9 @@ def _is_missing(value: str) -> bool:
     return value.strip() == ""
 
 
-def _build_summary(rows: list[dict[str, str]]) -> list[tuple[str, str]]:
+def _build_summary(rows: list[dict[str, str]], outcomes: list[bool]) -> list[tuple[str, str]]:
     total = len(rows)
-    ok_rows = [r for r in rows if r.get("status") == "ok"]
-    ok_count = len(ok_rows)
+    ok_count = sum(1 for ok in outcomes if ok)
     err_count = total - ok_count
     success_rate = (ok_count / total * 100.0) if total else 0.0
 
@@ -145,6 +141,9 @@ def _build_summary(rows: list[dict[str, str]]) -> list[tuple[str, str]]:
         "nutrition",
         "email",
         "phone",
+        "brand_name",
+        "product_name",
+        "best_before",
     ]
 
     summary: list[tuple[str, str]] = [
@@ -157,7 +156,8 @@ def _build_summary(rows: list[dict[str, str]]) -> list[tuple[str, str]]:
         avg_elapsed = sum(float(r.get("elapsed_sec", "0") or 0) for r in rows) / total
         summary.append(("summary_avg_elapsed_sec", f"{avg_elapsed:.2f}"))
 
-    base_rows = ok_rows if ok_rows else rows
+    base_rows = [r for r, ok in zip(rows, outcomes) if ok]
+    base_rows = base_rows if base_rows else rows
     base_n = len(base_rows) if base_rows else 1
     for field in tracked_fields:
         missing = sum(1 for r in base_rows if _is_missing(r.get(field, "")))
@@ -176,8 +176,18 @@ def main() -> int:
     group.add_argument("--dir", help="Path to directory containing images")
     parser.add_argument("--api", default="http://127.0.0.1:8000/api/parse", help="API endpoint URL")
     parser.add_argument("--out", default="batch_results.csv", help="Output CSV path")
-    parser.add_argument("--timeout", type=int, default=420, help="Per-image request timeout in seconds")
-    parser.add_argument("--retries", type=int, default=2, help="Retry attempts for transient failures")
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=40,
+        help="Per-image request timeout in seconds (default: 40)",
+    )
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=0,
+        help="Extra retries after first attempt (default: 0 = no retries)",
+    )
     parser.add_argument("--retry-wait", type=float, default=2.0, help="Seconds to wait between retries")
     args = parser.parse_args()
 
@@ -192,6 +202,7 @@ def main() -> int:
         raise SystemExit(f"Input directory not found: {dir_path}")
 
     rows: list[dict[str, str]] = []
+    outcomes: list[bool] = []
 
     if zip_path:
         with tempfile.TemporaryDirectory(prefix="gs1-batch-") as tmpdir:
@@ -203,17 +214,17 @@ def main() -> int:
             source_label = f"ZIP: {zip_path}"
             if not images:
                 raise SystemExit("No supported image files found in ZIP.")
-            _process_images(images, root_for_names, source_label, api_url, args, rows)
+            _process_images(images, root_for_names, source_label, api_url, args, rows, outcomes)
     else:
         images = _iter_images(dir_path)
         root_for_names = dir_path
         source_label = f"DIR: {dir_path}"
         if not images:
             raise SystemExit("No supported image files found in directory.")
-        _process_images(images, root_for_names, source_label, api_url, args, rows)
+        _process_images(images, root_for_names, source_label, api_url, args, rows, outcomes)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    summary_rows = _build_summary(rows)
+    summary_rows = _build_summary(rows, outcomes)
 
     with out_path.open("w", newline="", encoding="utf-8") as f:
         summary_writer = csv.writer(f)
@@ -226,7 +237,7 @@ def main() -> int:
         writer.writeheader()
         writer.writerows(rows)
 
-    ok_count = sum(1 for r in rows if r["status"] == "ok")
+    ok_count = sum(outcomes)
     err_count = len(rows) - ok_count
     print(f"\nDone. Wrote: {out_path}")
     print(f"Total: {len(rows)} | OK: {ok_count} | Errors: {err_count}")
@@ -240,11 +251,14 @@ def _process_images(
     api_url: str,
     args: argparse.Namespace,
     rows: list[dict[str, str]],
+    outcomes: list[bool],
 ) -> None:
     print(f"\nInput source: {source_label}")
     print(f"Images found: {len(images)}")
+    print(f"Timeout: {args.timeout}s | Retries: {args.retries}")
 
     total = len(images)
+    max_attempts = args.retries + 1
 
     for idx, image in enumerate(images, start=1):
         rel_name = image.relative_to(root_for_names).as_posix()
@@ -252,9 +266,12 @@ def _process_images(
         attempts = 0
         data: dict[str, Any] = {}
         err = ""
-        while attempts <= args.retries:
+        while attempts < max_attempts:
             attempts += 1
-            print(f"[{idx}/{total}] Processing {rel_name} (attempt {attempts}/{args.retries + 1})")
+            if max_attempts > 1:
+                print(f"[{idx}/{total}] Processing {rel_name} (attempt {attempts}/{max_attempts})")
+            else:
+                print(f"[{idx}/{total}] Processing {rel_name}")
 
             try:
                 data, err = _extract_one(image, api_url=api_url, timeout_sec=args.timeout)
@@ -265,7 +282,7 @@ def _process_images(
 
             if not err:
                 break
-            if attempts <= args.retries and _should_retry(err):
+            if attempts < max_attempts and _should_retry(err):
                 print(f"    transient failure: {err}")
                 print(f"    retrying in {args.retry_wait:.1f}s...")
                 time.sleep(args.retry_wait)
@@ -273,37 +290,28 @@ def _process_images(
             break
 
         elapsed_sec = time.perf_counter() - t0
-        validation = data.get("validation") if isinstance(data, dict) else None
-        validation_errors = ""
-        if isinstance(validation, dict):
-            validation_errors = _as_json_cell(validation.get("errors"))
+        ok = not err
 
         rows.append(
             {
                 "image_name": rel_name,
-                "status": "ok" if not err else "error",
-                "error": err,
-                "attempts": str(attempts),
                 "elapsed_sec": f"{elapsed_sec:.2f}",
                 "gtin": _as_json_cell(data.get("gtin")),
-                "gtin_source": _as_json_cell(data.get("gtin_source")),
                 "fssai": _as_json_cell(data.get("fssai")),
                 "mrp": _as_json_cell(data.get("mrp")),
                 "net_weight": _as_json_cell(data.get("net_weight")),
                 "ingredients": _as_json_cell(data.get("ingredients")),
                 "nutrition": _as_json_cell(data.get("nutrition")),
                 "email": _as_json_cell(data.get("email")),
-                "email_source": _as_json_cell(data.get("email_source")),
                 "phone": _as_json_cell(data.get("phone")),
-                "phone_source": _as_json_cell(data.get("phone_source")),
                 "barcode_decoder_available": _as_json_cell(data.get("barcode_decoder_available")),
-                "extract_model": _as_json_cell(data.get("extract_model")),
-                "fssai_valid": _as_json_cell(validation.get("fssai_valid") if isinstance(validation, dict) else ""),
-                "mrp_valid": _as_json_cell(validation.get("mrp_valid") if isinstance(validation, dict) else ""),
-                "validation_errors": validation_errors,
+                "brand_name": _as_json_cell(data.get("brand_name")),
+                "product_name": _as_json_cell(data.get("product_name")),
+                "best_before": _as_json_cell(data.get("best_before")),
             }
         )
-        print(f"    -> {'ok' if not err else 'error'} in {elapsed_sec:.1f}s")
+        outcomes.append(ok)
+        print(f"    -> {'ok' if ok else 'error'} in {elapsed_sec:.1f}s")
 
 
 if __name__ == "__main__":
