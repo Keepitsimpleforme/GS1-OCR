@@ -27,8 +27,8 @@ npm run build
 echo "[deploy] restarting backend service…"
 sudo systemctl restart ocr-backend
 
-echo "[deploy] reloading nginx…"
-sudo nginx -t && sudo systemctl reload nginx
+echo "[deploy] syncing nginx site from repo ( /etc/nginx is not updated by git pull )…"
+APP_DIR="$APP_DIR" bash "$APP_DIR/scripts/sync-nginx.sh"
 
 echo "[deploy] done — $(date '+%Y-%m-%d %H:%M:%S')"
 sudo systemctl status ocr-backend --no-pager | head -5

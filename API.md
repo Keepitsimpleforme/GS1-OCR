@@ -23,7 +23,13 @@ OpenAPI is served **under `/api/`** so the same nginx `location /api/` proxy rea
 
 **Direct to uvicorn (bypass nginx):** `http://127.0.0.1:8000/api/docs` on the VM.
 
-After editing nginx on the VM, run `sudo nginx -t && sudo systemctl reload nginx`.
+After editing `nginx.conf` in the repo, **copy it into nginx’s site path** (a plain `git pull` does not update `/etc/nginx/`):
+
+```bash
+bash ~/ocr-project/scripts/sync-nginx.sh
+```
+
+Or use `scripts/deploy.sh`, which runs `sync-nginx.sh` after build and backend restart.
 
 Legacy routes on **port 8080** (`/front`, `/back`, etc.) are not required to expose Swagger; use port **80** and `/api/docs` for the API explorer.
 
