@@ -71,7 +71,15 @@ OCR TEXT:
 _cors = os.getenv("CORS_ORIGINS", "http://localhost:5173")
 CORS_ORIGINS: Final[list[str]] = [o.strip() for o in _cors.split(",") if o.strip()]
 
-app = FastAPI(title="OCR Extract API", version="0.1.0")
+# OpenAPI lives under /api/* so nginx can proxy a single `location /api/` block;
+# `/docs` at site root would otherwise be handled by the SPA (try_files → index.html).
+app = FastAPI(
+    title="OCR Extract API",
+    version="0.1.0",
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    openapi_url="/api/openapi.json",
+)
 
 app.add_middleware(
     CORSMiddleware,

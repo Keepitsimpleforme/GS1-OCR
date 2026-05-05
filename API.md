@@ -11,19 +11,21 @@ Replace host with your server, e.g. `http://20.204.169.52`.
 
 ### Interactive docs (Swagger UI)
 
-FastAPI serves OpenAPI automatically:
+OpenAPI is served **under `/api/`** so the same nginx `location /api/` proxy reaches FastAPI. Paths like `http://<host>/docs` only hit the React static site (SPA fallback); use the URLs below instead.
 
 | URL | Description |
 |-----|-------------|
-| `http://<host>/docs` | **Swagger UI** — try requests in the browser |
-| `http://<host>/redoc` | **ReDoc** — alternate layout |
-| `http://<host>/openapi.json` | Raw OpenAPI schema |
+| `http://<host>/api/docs` | **Swagger UI** — try requests in the browser |
+| `http://<host>/api/redoc` | **ReDoc** — alternate layout |
+| `http://<host>/api/openapi.json` | Raw OpenAPI schema |
 
-**Direct to uvicorn (bypass nginx):** `http://127.0.0.1:8000/docs` on the VM.
+**Shortcuts:** `http://<host>/docs`, `/redoc`, and `/openapi.json` redirect (302) to the `/api/...` equivalents when using the repo `nginx.conf`.
 
-**Through nginx (port 80):** the repo `nginx.conf` proxies `/docs`, `/redoc`, and `/openapi.json` to the backend. After editing nginx on the VM, run `sudo nginx -t && sudo systemctl reload nginx`.
+**Direct to uvicorn (bypass nginx):** `http://127.0.0.1:8000/api/docs` on the VM.
 
-Legacy routes on **port 8080** (`/front`, `/back`, etc.) are not required to expose Swagger; use port **80** for API explorer.
+After editing nginx on the VM, run `sudo nginx -t && sudo systemctl reload nginx`.
+
+Legacy routes on **port 8080** (`/front`, `/back`, etc.) are not required to expose Swagger; use port **80** and `/api/docs` for the API explorer.
 
 ---
 
