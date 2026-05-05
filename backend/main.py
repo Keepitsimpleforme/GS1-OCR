@@ -532,6 +532,59 @@ def _extract_html_table(text: str) -> Optional[str]:
     return match.group(0).strip()
 
 
+def _html_table_to_readable_lines(html: str) -> str:
+    """Turn an HTML <table> into plain lines: one row per line, cells separated by ' | '."""
+    rows: list[str] = []
+    for m in re.finditer(r"<tr\b[^>]*>([\s\S]*?)</tr>", html, flags=re.I):
+        row_html = m.group(1)
+        cells = re.findall(r"<(?:th|td)\b[^>]*>([\s\S]*?)</(?:th|td)>", row_html, flags=re.I)
+        if not cells:
+            continue
+        parts: list[str] = []
+        for cell in cells:
+            plain = _normalize_space(re.sub(r"<[^>]+>", " ", cell))
+            plain = plain.replace("|", "/").strip()
+            if plain:
+                parts.append(plain)
+        if parts:
+            rows.append(" | ".join(parts))
+    return "\n".join(rows)
+
+
+def _nutrition_to_readable(value: Any) -> Optional[str]:
+    """Nutrition for JSON responses: no raw HTML tables; readable text or line-oriented rows."""
+    if value is None:
+        return None
+    if isinstance(value, list):
+        lines: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                pairs = []
+                for k, v in item.items():
+                    if v is None or str(v).strip() == "":
+                        continue
+                    label = str(k).replace("_", " ").strip()
+                    pairs.append(f"{label}: {v}")
+                if pairs:
+                    lines.append(", ".join(pairs))
+            else:
+                t = str(item).strip()
+                if t:
+                    lines.append(_nutrition_to_readable(t) or t)
+        return "\n".join(lines) if lines else None
+    text = str(value).strip()
+    if not text:
+        return None
+    low = text.lower()
+    if "<table" in low or "<tr" in low or "<td" in low or "<th" in low:
+        readable = _html_table_to_readable_lines(text)
+        if readable.strip():
+            return readable.strip()
+        fallback = _normalize_space(re.sub(r"<[^>]+>", " ", text))
+        return fallback or None
+    return _normalize_space(text)
+
+
 def _extract_product_fields(
     text: str,
     barcode_gtin: Optional[str] = None,
@@ -580,6 +633,8 @@ def _extract_product_fields(
         ),
     )
 
+    nutritional_readable = _nutrition_to_readable(nutritional)
+
     return {
         "mrp": _extract_mrp(text),
         "gtin": gtin,
@@ -592,8 +647,8 @@ def _extract_product_fields(
         "best_before": _extract_best_before(text),
         "brand_name": brand_name,
         "product_name": product_name,
-        "nutritional": nutritional,
-        "nutritable": nutritional,
+        "nutritional": nutritional_readable,
+        "nutritable": nutritional_readable,
         "ingredients": ingredients,
     }
 
@@ -682,14 +737,8 @@ def _normalize_ingredients(value: Any) -> Optional[str]:
 
 
 def _normalize_nutrition(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return _coerce_optional_str(value)
-    try:
-        return json.dumps(value, ensure_ascii=True)
-    except Exception:
-        return _coerce_optional_str(value)
+    """Map Qwen nutrition output to the same readable format as regex/HTML paths."""
+    return _nutrition_to_readable(value)
 
 
 def _is_valid_email(value: Optional[str]) -> bool:
@@ -844,6 +893,15 @@ def _listify(value: Optional[str]) -> list[str]:
     return [cleaned] if cleaned else []
 
 
+def _nutri_table_lines(value: Optional[str]) -> list[str]:
+    """Legacy nutri_table: plain-text rows only (no HTML); one JSON string per table row."""
+    cleaned = _coerce_optional_str(value)
+    if not cleaned:
+        return []
+    lines = [ln.strip() for ln in cleaned.splitlines() if ln.strip()]
+    return lines if len(lines) > 1 else [cleaned]
+
+
 def _sanity_score(text: str) -> float:
     # Lightweight proxy score (0-100) based on OCR text richness.
     words = re.findall(r"\b\w+\b", text)
@@ -909,7 +967,7 @@ async def legacy_back(back: UploadFile = File(...)) -> dict[str, Any]:
         "best_before": _listify(fields.get("best_before")),
         "mrp": _listify(fields.get("mrp")),
         "ingredients": _listify(fields.get("ingredients")),
-        "nutri_table": _listify(fields.get("nutritional")),
+        "nutri_table": _nutri_table_lines(fields.get("nutritional")),
     }
 
     flags = {
