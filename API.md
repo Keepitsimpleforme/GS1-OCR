@@ -4,8 +4,8 @@ This document describes the FastAPI backend exposed behind nginx. Paths and port
 
 | Listener | Purpose |
 |----------|---------|
-| **Port 80** | SPA (static frontend) + `/api/*`, `/health` proxied to backend |
-| **Port 8080** | Legacy-compatible OCR routes: `/front`, `/back`, `/ingredients`, `/nutritional` |
+| **Port 80** | SPA + `/api/*`, `/health`, and legacy **`POST /front`**, **`/back`**, **`/ingredients`**, **`/nutritional`** proxied to the backend (so Swagger “Try it out” on port 80 works) |
+| **Port 8080** | Optional second nginx server: same legacy routes if you keep a separate listener (not required when port 80 proxies them) |
 
 Replace host with your server, e.g. `http://20.204.169.52`.
 
@@ -31,7 +31,7 @@ bash ~/ocr-project/scripts/sync-nginx.sh
 
 Or use `scripts/deploy.sh`, which runs `sync-nginx.sh` after build and backend restart.
 
-Legacy routes on **port 8080** (`/front`, `/back`, etc.) are not required to expose Swagger; use port **80** and `/api/docs` for the API explorer.
+Use port **80** and **`/api/docs`** for Swagger; legacy multipart routes use the **same host** (e.g. `http://<host>/front`) once `sync-nginx.sh` has installed the repo `nginx.conf`.
 
 ---
 
