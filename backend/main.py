@@ -119,6 +119,101 @@ def _normalize_space(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+_NOISE_LINE_RE = re.compile(
+    r"\b("
+    r"image\s+on\s+the\s+front|for\s+consumer|customer\s*care|helpline|"
+    r"scan\s+to|follow\s+us|visit\s+our|www\.|terms?\s*&\s*conditions|"
+    r"serving\s+suggestion|cut\s+here|ad(?:vertisement)?|offer|coupon"
+    r")\b",
+    flags=re.I,
+)
+
+
+def _clean_label_text(value: Optional[str]) -> Optional[str]:
+    """Remove OCR punctuation/noise around display fields like brand/product."""
+    text = _coerce_optional_str(value)
+    if not text:
+        return None
+    text = re.sub(r"^[#*~|_`'\".,;:+=\-\s]+", "", text)
+    text = re.sub(r"[#*~|_`'\".,;:+=\-\s]+$", "", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = _normalize_space(text)
+    if not text:
+        return None
+    if _NOISE_LINE_RE.search(text):
+        return None
+    # Avoid code-like / numeric-only fragments.
+    if re.fullmatch(r"[\d\W_]+", text):
+        return None
+    return text
+
+
+def _looks_noisy_line(value: str) -> bool:
+    low = value.lower()
+    if _NOISE_LINE_RE.search(low):
+        return True
+    if re.fullmatch(r"[\d\s\-/.:|]{6,}", value):
+        return True
+    return False
+
+
+def _contains_markup_or_table(value: str) -> bool:
+    low = value.lower()
+    return "<table" in low or "<tr" in low or "<td" in low or "<th" in low or "</" in low
+
+
+def _is_high_quality_ingredients(value: Optional[str]) -> bool:
+    text = _coerce_optional_str(value)
+    if not text:
+        return False
+    if _contains_markup_or_table(text):
+        return False
+    if len(text) < 12:
+        return False
+    low = text.lower()
+    bad_markers = (
+        "customer care",
+        "helpline",
+        "www.",
+        "marketed by",
+        "manufactured by",
+        "consumer",
+        "nutritional information",
+        "best before",
+        "mrp",
+        "fssai",
+        "scan to",
+    )
+    if any(marker in low for marker in bad_markers):
+        return False
+    comma_count = text.count(",")
+    token_count = len(re.findall(r"[A-Za-z]{3,}", text))
+    return comma_count >= 2 and token_count >= 6
+
+
+def _is_high_quality_nutrition(value: Optional[str]) -> bool:
+    text = _coerce_optional_str(value)
+    if not text:
+        return False
+    if _contains_markup_or_table(text):
+        return False
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return False
+    if any(_looks_noisy_line(ln) for ln in lines):
+        return False
+    nutrient_hits = sum(
+        1
+        for ln in lines
+        if re.search(
+            r"\b(energy|protein|fat|carbohydrate|sugar|sodium|calcium|cholesterol|fiber|fibre)\b",
+            ln,
+            flags=re.I,
+        )
+    )
+    return nutrient_hits >= 2
+
+
 def _extract_emails(text: str) -> list[str]:
     emails = re.findall(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", text, flags=re.I)
     seen: set[str] = set()
@@ -392,7 +487,7 @@ def _extract_best_before(text: str) -> Optional[str]:
         return None
     value = _normalize_space(match.group(1))
     value = re.split(r"\b(?:batch|mfg|mrp|net)\b", value, maxsplit=1, flags=re.I)[0].strip(" ,;:-")
-    return value or None
+    return _normalize_best_before(value)
 
 
 def _extract_brand_product(text: str) -> tuple[Optional[str], Optional[str]]:
@@ -416,19 +511,24 @@ def _extract_brand_product(text: str) -> tuple[Optional[str], Optional[str]]:
         low = line.lower()
         if any(word in low for word in skip):
             continue
+        if _looks_noisy_line(line):
+            continue
         if len(line) < 3 or len(line) > 60:
             continue
         if re.fullmatch(r"[\d\s\-/.:]+", line):
             continue
-        candidates.append(line)
+        cleaned = _clean_label_text(line)
+        if not cleaned:
+            continue
+        candidates.append(cleaned)
         if len(candidates) >= 6:
             break
 
-    brand = candidates[0] if candidates else None
+    brand = _clean_label_text(candidates[0]) if candidates else None
     product = None
     for line in candidates[1:]:
         if line != brand:
-            product = line
+            product = _clean_label_text(line)
             break
     return brand, product
 
@@ -530,7 +630,7 @@ def _extract_ingredients_precise(text: str) -> Optional[str]:
         maxsplit=1,
         flags=re.I,
     )[0].strip(" ,;:-")
-    return joined or None
+    return _normalize_ingredients(joined)
 
 
 def _extract_html_table(text: str) -> Optional[str]:
@@ -590,7 +690,21 @@ def _nutrition_to_readable(value: Any) -> Optional[str]:
             return readable.strip()
         fallback = _normalize_space(re.sub(r"<[^>]+>", " ", text))
         return fallback or None
-    return _normalize_space(text)
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return _normalize_space(text)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for ln in lines:
+        norm = _normalize_space(ln)
+        if not norm or _looks_noisy_line(norm):
+            continue
+        key = norm.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(norm)
+    return "\n".join(deduped) if deduped else None
 
 
 def _extract_product_fields(
@@ -601,8 +715,7 @@ def _extract_product_fields(
     emails = _extract_emails(text)
     phones = _extract_phones(text)
     table_html = _extract_html_table(text)
-    gtin_from_text = _extract_gtin(text, fssai)
-    gtin = barcode_gtin or gtin_from_text
+    gtin = barcode_gtin
     brand_name, product_name = _extract_brand_product(text)
 
     nutritional = table_html or _extract_section(
@@ -647,7 +760,6 @@ def _extract_product_fields(
         "mrp": _extract_mrp(text),
         "gtin": gtin,
         "GTIN": gtin,
-        "gtin_source": "barcode" if barcode_gtin else ("ocr" if gtin_from_text else "none"),
         "fssai": fssai,
         "email": emails[0] if emails else None,
         "phone": phones[0] if phones else None,
@@ -735,13 +847,48 @@ def _coerce_optional_str(value: Any) -> Optional[str]:
     return text or None
 
 
+def _normalize_best_before(value: Any) -> Optional[str]:
+    text = _coerce_optional_str(value)
+    if not text:
+        return None
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = _normalize_space(text)
+    text = re.sub(r"^(?:best\s*before|use\s*by|expiry|exp(?:iry)?\s*date)\s*[:\-]?\s*", "", text, flags=re.I)
+    text = re.split(
+        r"\b(?:batch|lot|mfg|manufactured|mrp|net\s*(?:wt|weight|qty|quantity)|fssai)\b",
+        text,
+        maxsplit=1,
+        flags=re.I,
+    )[0].strip(" ,;:-")
+    if not text or _looks_noisy_line(text):
+        return None
+    # Canonical uppercase for consistent API output.
+    return text.upper()
+
+
 def _normalize_ingredients(value: Any) -> Optional[str]:
     if value is None:
         return None
     if isinstance(value, list):
         parts = [str(item).strip() for item in value if str(item).strip()]
-        return ", ".join(parts) if parts else None
-    return _coerce_optional_str(value)
+        value = ", ".join(parts) if parts else None
+    text = _coerce_optional_str(value)
+    if not text:
+        return None
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\b(?:ingredients?|contains)\s*:?\s*", "", text, flags=re.I)
+    text = re.sub(r"[;|]+", ",", text)
+    text = re.sub(r"\s*,\s*", ", ", text)
+    text = _normalize_space(text)
+    text = re.split(
+        r"\b(?:nutritional?|nutrition|best before|mrp|fssai|customer care|helpline|barcode)\b",
+        text,
+        maxsplit=1,
+        flags=re.I,
+    )[0].strip(" ,;:-")
+    if not text or _looks_noisy_line(text):
+        return None
+    return text
 
 
 def _normalize_nutrition(value: Any) -> Optional[str]:
@@ -928,7 +1075,10 @@ async def legacy_front(front: UploadFile = File(...)) -> dict[str, Any]:
     t0 = time.perf_counter()
     text = await _extract_text_from_bytes(body, front.filename or "")
     pre_process = time.perf_counter() - t0
-    brand_name, product_name = _extract_brand_product(text)
+    regex_brand_name, regex_product_name = _extract_brand_product(text)
+    llm_fields = await _extract_structured_with_qwen(text)
+    brand_name = _clean_label_text(_coerce_optional_str(llm_fields.get("brand_name")) or regex_brand_name)
+    product_name = _clean_label_text(_coerce_optional_str(llm_fields.get("product_name")) or regex_product_name)
 
     total = time.perf_counter() - request_start
     return {
@@ -936,7 +1086,6 @@ async def legacy_front(front: UploadFile = File(...)) -> dict[str, Any]:
             "brand_name": brand_name or "",
             "product_name": product_name or "",
         },
-        "sanity_check": {"front": _sanity_score(text)},
         "filename": {"front": os.path.basename(front.filename or "")},
         "time": {
             "pre_process": round(pre_process, 3),
@@ -964,6 +1113,15 @@ async def legacy_back(back: UploadFile = File(...)) -> dict[str, Any]:
     fssai = _extract_fssai(text)
     barcode_gtin = _pick_gtin_from_barcodes(barcodes, fssai)
     fields = _extract_product_fields(text, barcode_gtin=barcode_gtin)
+    llm_fields = await _extract_structured_with_qwen(text)
+    # Keep email deterministic and regex-only.
+    fields["email"] = fields.get("email")
+    fields["mrp"] = _coerce_optional_str(llm_fields.get("mrp")) or fields.get("mrp")
+    fields["best_before"] = _normalize_best_before(llm_fields.get("best_before")) or _normalize_best_before(fields.get("best_before"))
+    llm_ingredients = _normalize_ingredients(llm_fields.get("ingredients"))
+    llm_nutrition = _normalize_nutrition(llm_fields.get("nutrition"))
+    fields["ingredients"] = llm_ingredients if _is_high_quality_ingredients(llm_ingredients) else fields.get("ingredients")
+    fields["nutritional"] = llm_nutrition if _is_high_quality_nutrition(llm_nutrition) else fields.get("nutritional")
     regex_time = time.perf_counter() - t0
 
     back_result = {
@@ -978,20 +1136,9 @@ async def legacy_back(back: UploadFile = File(...)) -> dict[str, Any]:
         "nutri_table": _nutri_table_lines(fields.get("nutritional")),
     }
 
-    flags = {
-        "phone": "From regex" if back_result["phone"] else "Not found",
-        "mail": "From regex" if back_result["mail"] else "Not found",
-        "fssai": "From regex" if back_result["fssai"] else "Not found",
-        "GTIN": "From barcode/ocr" if back_result["GTIN"] else "Not found",
-        "netwt": "From regex" if back_result["netwt"] else "Not found",
-        "best_before": "From regex" if back_result["best_before"] else "Not found",
-        "mrp": "From regex" if back_result["mrp"] else "Not found",
-    }
-
     total = time.perf_counter() - request_start
     return {
         "result": {"back": back_result},
-        "flags": flags,
         "time": {
             "barcode": round(barcode_time, 3),
             "pre_process": round(barcode_time + ocr_time, 3),
@@ -1000,7 +1147,6 @@ async def legacy_back(back: UploadFile = File(...)) -> dict[str, Any]:
             "total_time": round(total, 3),
         },
         "filename": os.path.basename(back.filename or ""),
-        "sanity_check": {"back": _sanity_score(text)},
     }
 
 
@@ -1013,21 +1159,20 @@ async def legacy_ingredients(ingredients: UploadFile = File(...)) -> dict[str, A
     t0 = time.perf_counter()
     text = await _extract_text_from_bytes(body, ingredients.filename or "")
     pre_process = time.perf_counter() - t0
-    extracted = _extract_ingredients_precise(text)
+    regex_extracted = _extract_ingredients_precise(text)
+    llm_fields = await _extract_structured_with_qwen(text)
+    llm_extracted = _normalize_ingredients(llm_fields.get("ingredients"))
+    extracted = llm_extracted if _is_high_quality_ingredients(llm_extracted) else regex_extracted
 
     total = time.perf_counter() - request_start
-    key = "ingredients"
     return {
-        "url": {key: ""},
-        "filename": {key: os.path.basename(ingredients.filename or "")},
-        "sanity_check": {key: _sanity_score(text)},
-        "result": {key: text},
+        "filename": os.path.basename(ingredients.filename or ""),
         "time": {
             "pre_process": round(pre_process, 3),
             "post_process": round(max(0.0, total - pre_process), 3),
             "total_time": round(total, 3),
         },
-        "Ingredients": extracted or "",
+        "ingredients": extracted or "",
     }
 
 
@@ -1041,20 +1186,19 @@ async def legacy_nutritional(nutritional: UploadFile = File(...)) -> dict[str, A
     text = await _extract_text_from_bytes(body, nutritional.filename or "")
     pre_process = time.perf_counter() - t0
     fields = _extract_product_fields(text)
+    llm_fields = await _extract_structured_with_qwen(text)
+    llm_nutrition = _normalize_nutrition(llm_fields.get("nutrition"))
+    fields["nutritional"] = llm_nutrition if _is_high_quality_nutrition(llm_nutrition) else fields.get("nutritional")
 
     total = time.perf_counter() - request_start
-    key = "nutritional"
     return {
-        "url": {key: ""},
-        "filename": {key: os.path.basename(nutritional.filename or "")},
-        "sanity_check": {key: _sanity_score(text)},
-        "result": {key: text},
+        "filename": os.path.basename(nutritional.filename or ""),
         "time": {
             "pre_process": round(pre_process, 3),
             "post_process": round(max(0.0, total - pre_process), 3),
             "total_time": round(total, 3),
         },
-        "Nutritional Content": fields.get("nutritional") or "",
+        "nutritional_content": fields.get("nutritional") or "",
     }
 
 
@@ -1067,17 +1211,18 @@ async def parse_product(file: UploadFile = File(...)) -> dict[str, Any]:
 
     Fields returned
     ---------------
-    gtin            : GTIN/EAN/UPC barcode number (barcode scan preferred, OCR fallback)
-    gtin_source     : "barcode" | "ocr" | "none"
-    fssai           : 14-digit FSSAI licence number
+    gtin            : GTIN from barcode decoder only
+    fssai           : 14-digit FSSAI licence number (label-aware regex)
     mrp             : MRP value as string (digits only, no currency symbol)
     net_weight      : Net weight/content with unit (e.g. "800g", "1.5kg")
-    ingredients     : Ingredients list as a single string
-    nutrition       : Nutritional information (HTML table or plain text block)
-    email           : First email address found on the label
-    phone           : First phone number found on the label
+    ingredients     : Cleaned ingredients string (Qwen-first, regex fallback)
+    nutrition       : Cleaned nutritional content string (Qwen-first, regex fallback)
+    email           : First valid email from regex
+    phone           : First valid phone number from regex
+    best_before     : Best-before value
+    brand_name      : Clean brand text
+    product_name    : Clean product text
     barcode_decoder_available : Whether pyzbar/zbar is installed on this server
-    validation      : { fssai_valid, mrp_valid, errors }
     """
     request_started = time.perf_counter()
     timing: dict[str, float] = {}
@@ -1100,122 +1245,48 @@ async def parse_product(file: UploadFile = File(...)) -> dict[str, Any]:
     llm_fields = await _extract_structured_with_qwen(text)
     timing["qwen_sec"] = round(time.perf_counter() - t0, 3)
 
-    llm_fssai = re.sub(r"\D", "", str(llm_fields.get("fssai_lic_no") or ""))
-    if len(llm_fssai) != 14:
-        llm_fssai = ""
+    # Policy: GTIN from barcode decoder only; FSSAI/email deterministic via regex.
+    merged_gtin = barcode_gtin
 
-    llm_gtin_raw = _coerce_optional_str(llm_fields.get("gtin"))
-    llm_gtin = None
-    if llm_gtin_raw:
-        llm_digits = re.sub(r"\D", "", llm_gtin_raw)
-        if _is_valid_gtin(llm_digits, llm_fssai or fssai):
-            llm_gtin = llm_digits
-
-    merged_gtin = barcode_gtin or llm_gtin or regex_fields.get("gtin")
-    if barcode_gtin:
-        gtin_source = "barcode"
-    elif llm_gtin:
-        gtin_source = "qwen"
-    elif regex_fields.get("gtin"):
-        gtin_source = "ocr"
-    else:
-        gtin_source = "none"
-
-    llm_email = _coerce_optional_str(llm_fields.get("email"))
     regex_email = regex_fields.get("email")
-    if _is_valid_email(llm_email):
-        merged_email = llm_email
-        email_source = "qwen"
-    elif _is_valid_email(regex_email):
+    if _is_valid_email(regex_email):
         merged_email = regex_email
-        email_source = "regex"
     else:
         merged_email = None
-        email_source = "none"
-
-    llm_phone = _coerce_optional_str(llm_fields.get("phone"))
-    regex_phone = regex_fields.get("phone")
-    if _is_valid_phone(llm_phone):
-        merged_phone = llm_phone
-        phone_source = "qwen"
-    elif _is_valid_phone(regex_phone):
-        merged_phone = regex_phone
-        phone_source = "regex"
-    else:
-        merged_phone = None
-        phone_source = "none"
-
-    llm_brand_name = _coerce_optional_str(llm_fields.get("brand_name"))
-    regex_brand_name = regex_fields.get("brand_name")
-    if llm_brand_name:
-        merged_brand_name = llm_brand_name
-        brand_name_source = "qwen"
-    elif regex_brand_name:
-        merged_brand_name = regex_brand_name
-        brand_name_source = "regex"
-    else:
-        merged_brand_name = None
-        brand_name_source = "none"
-
-    llm_product_name = _coerce_optional_str(llm_fields.get("product_name"))
-    regex_product_name = regex_fields.get("product_name")
-    if llm_product_name:
-        merged_product_name = llm_product_name
-        product_name_source = "qwen"
-    elif regex_product_name:
-        merged_product_name = regex_product_name
-        product_name_source = "regex"
-    else:
-        merged_product_name = None
-        product_name_source = "none"
-
-    llm_best_before = _coerce_optional_str(llm_fields.get("best_before"))
-    regex_best_before = regex_fields.get("best_before")
-    if llm_best_before:
-        merged_best_before = llm_best_before
-        best_before_source = "qwen"
-    elif regex_best_before:
-        merged_best_before = regex_best_before
-        best_before_source = "regex"
-    else:
-        merged_best_before = None
-        best_before_source = "none"
 
     fields: dict[str, Optional[str]] = {
         "gtin": merged_gtin,
-        "fssai": llm_fssai or regex_fields.get("fssai"),
+        "fssai": regex_fields.get("fssai"),
         "mrp": _coerce_optional_str(llm_fields.get("mrp")) or regex_fields.get("mrp"),
         "net_wt": _coerce_optional_str(llm_fields.get("net_weight")) or regex_fields.get("net_wt"),
-        "ingredients": _normalize_ingredients(llm_fields.get("ingredients")) or regex_fields.get("ingredients"),
-        "nutritional": _normalize_nutrition(llm_fields.get("nutrition")) or regex_fields.get("nutritional"),
+        "ingredients": regex_fields.get("ingredients"),
+        "nutritional": regex_fields.get("nutritional"),
         "email": merged_email,
-        "phone": merged_phone,
-        "best_before": merged_best_before,
-        "brand_name": merged_brand_name,
-        "product_name": merged_product_name,
+        "phone": regex_fields.get("phone"),
+        "best_before": _normalize_best_before(llm_fields.get("best_before")) or _normalize_best_before(regex_fields.get("best_before")),
+        "brand_name": _clean_label_text(_coerce_optional_str(llm_fields.get("brand_name")) or regex_fields.get("brand_name")),
+        "product_name": _clean_label_text(_coerce_optional_str(llm_fields.get("product_name")) or regex_fields.get("product_name")),
     }
+    llm_ingredients = _normalize_ingredients(llm_fields.get("ingredients"))
+    llm_nutrition = _normalize_nutrition(llm_fields.get("nutrition"))
+    if _is_high_quality_ingredients(llm_ingredients):
+        fields["ingredients"] = llm_ingredients
+    if _is_high_quality_nutrition(llm_nutrition):
+        fields["nutritional"] = llm_nutrition
 
     result: dict[str, Any] = {
         "gtin":                      fields.get("gtin"),
-        "gtin_source":               gtin_source,
         "fssai":                     fields.get("fssai"),
         "mrp":                       fields.get("mrp"),
         "net_weight":                fields.get("net_wt"),
         "ingredients":               fields.get("ingredients"),
         "nutrition":                 fields.get("nutritional"),
         "email":                     fields.get("email"),
-        "email_source":              email_source,
         "phone":                     fields.get("phone"),
-        "phone_source":              phone_source,
         "best_before":               fields.get("best_before"),
-        "best_before_source":        best_before_source,
         "brand_name":                fields.get("brand_name"),
-        "brand_name_source":         brand_name_source,
         "product_name":              fields.get("product_name"),
-        "product_name_source":       product_name_source,
         "barcode_decoder_available": BARCODE_LIB_AVAILABLE,
-        "validation":                _validate_fields(fields),
-        "extract_model":             EXTRACT_MODEL,
         "timing":                    timing,
     }
     timing["total_sec"] = round(time.perf_counter() - request_started, 3)
