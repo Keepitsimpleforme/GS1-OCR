@@ -23,6 +23,16 @@ except Exception:
     zbar_decode = None  # type: ignore[assignment]
     BARCODE_LIB_AVAILABLE: Final = False
 
+try:
+    import cv2  # type: ignore[import-not-found]
+    import numpy as np  # type: ignore[import-not-found]
+
+    _OPENCV_AVAILABLE: Final = True
+except Exception:
+    cv2 = None  # type: ignore[assignment]
+    np = None  # type: ignore[assignment]
+    _OPENCV_AVAILABLE: Final = False
+
 OCR_MODEL: Final = os.getenv(
     "OLLAMA_MODEL_OCR",
     os.getenv("OLLAMA_MODEL", "maternion/LightOnOCR-2"),
@@ -129,6 +139,136 @@ _NOISE_LINE_RE = re.compile(
 )
 
 
+_BRAND_LEXICON: Final[dict[str, tuple[str, ...]]] = {
+    "Amul": ("amul",),
+    "Mother Dairy": ("mother dairy",),
+    "Britannia": ("britannia",),
+    "Parle": ("parle", "parle-g"),
+    "Nestle": ("nestle", "maggi", "nescafe", "kitkat", "milkybar"),
+    "Hindustan Unilever": ("hindustan unilever", "hul", "surf excel", "wheel", "rin", "ponds", "vaseline", "lux", "dove", "pepsodent", "closeup", "brooke bond", "taj mahal tea", "bru", "knorr", "kissan", "horlicks", "boost"),
+    "ITC": ("itc", "aashirvaad", "sunfeast", "bingo", "yippee", "candyman"),
+    "Dabur": ("dabur", "real", "hajmola", "vatika", "dabur honey"),
+    "Patanjali": ("patanjali",),
+    "Marico": ("marico", "saffola", "parachute"),
+    "Godrej": ("godrej", "good knight", "cinthol", "aer"),
+    "Tata Consumer": ("tata tea", "tetley", "tata salt", "himalayan", "sampann"),
+    "MDH": ("mdh",),
+    "Everest": ("everest",),
+    "MTR": ("mtr",),
+    "Haldirams": ("haldiram", "haldirams", "haldiram's"),
+    "Bikaji": ("bikaji",),
+    "Balaji": ("balaji wafers", "balaji"),
+    "Lays": ("lays", "lay's"),
+    "Kurkure": ("kurkure",),
+    "Doritos": ("doritos",),
+    "Pringles": ("pringles",),
+    "Cadbury": ("cadbury", "dairy milk", "5 star", "perk", "bournville", "bournvita"),
+    "Mars": ("mars", "snickers", "galaxy",),
+    "Ferrero": ("ferrero", "nutella", "kinder"),
+    "Kelloggs": ("kelloggs", "kellogg's"),
+    "Quaker": ("quaker",),
+    "Bagrrys": ("bagrrys", "bagrry's"),
+    "Pillsbury": ("pillsbury",),
+    "Fortune": ("fortune",),
+    "Dhara": ("dhara",),
+    "Sundrop": ("sundrop",),
+    "Engine": ("engine mustard oil", "engine"),
+    "Del Monte": ("del monte",),
+    "Kissan": ("kissan",),
+    "Top Ramen": ("top ramen",),
+    "Yippee": ("yippee", "yipee"),
+    "Chings Secret": ("chings", "ching's", "chings secret", "ching's secret"),
+    "Knorr": ("knorr",),
+    "Pears": ("pears",),
+    "Dettol": ("dettol",),
+    "Lifebuoy": ("lifebuoy",),
+    "Clinic Plus": ("clinic plus",),
+    "Head and Shoulders": ("head and shoulders",),
+    "Pantene": ("pantene",),
+    "Sunsilk": ("sunsilk",),
+    "Colgate": ("colgate",),
+    "Sensodyne": ("sensodyne",),
+    "Nivea": ("nivea",),
+    "Gillette": ("gillette",),
+    "Whisper": ("whisper",),
+    "Stayfree": ("stayfree",),
+    "Dettol Savlon": ("savlon", "dettol"),
+    "Bournvita": ("bournvita",),
+    "Complan": ("complan",),
+    "Pediasure": ("pediasure",),
+    "Yakult": ("yakult",),
+    "Epigamia": ("epigamia",),
+    "Gowardhan": ("gowardhan",),
+    "Nestle Everyday": ("everyday dairy whitener", "nestle everyday", "everyday"),
+    "Nandini": ("nandini",),
+    "Aavin": ("aavin",),
+    "Heritage": ("heritage",),
+    "Vadilal": ("vadilal",),
+    "Kwality Walls": ("kwality walls", "kwality wall's"),
+    "Arun Icecreams": ("arun icecreams", "arun ice creams", "arun"),
+    "Paper Boat": ("paper boat",),
+    "Maaza": ("maaza",),
+    "Frooti": ("frooti",),
+    "Slice": ("slice",),
+    "Minute Maid": ("minute maid",),
+    "Bisleri": ("bisleri",),
+    "Kinley": ("kinley",),
+    "Aquafina": ("aquafina",),
+    "Bailley": ("bailley",),
+    "Catch": ("catch",),
+    "Oral-B": ("oral-b", "oral b"),
+    "Clean Mate": ("clean mate",),
+}
+
+
+def _normalize_for_lookup(value: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", value.lower())).strip()
+
+
+def _apply_brand_lexicon(
+    brand_name: Optional[str],
+    product_name: Optional[str],
+) -> tuple[Optional[str], Optional[str]]:
+    brand = _clean_label_text(brand_name)
+    product = _clean_label_text(product_name)
+    pool = [p for p in (brand, product, f"{brand} {product}".strip() if brand or product else None) if p]
+    if not pool:
+        return brand, product
+    best_canonical: Optional[str] = None
+    best_alias: Optional[str] = None
+    best_len = -1
+    for text in pool:
+        norm = _normalize_for_lookup(text)
+        for canonical, aliases in _BRAND_LEXICON.items():
+            for alias in aliases:
+                a = _normalize_for_lookup(alias)
+                if not a:
+                    continue
+                if re.search(rf"\b{re.escape(a)}\b", norm) and len(a) > best_len:
+                    best_len = len(a)
+                    best_canonical = canonical
+                    best_alias = a
+    if not best_canonical:
+        return brand, product
+
+    canonical_brand = best_canonical
+    # Remove matched alias/brand text from joined label to derive product.
+    joined = _normalize_space(" ".join([x for x in (brand, product) if x]))
+    norm_joined = _normalize_for_lookup(joined)
+    remainder = norm_joined
+    if best_alias:
+        remainder = re.sub(rf"\b{re.escape(best_alias)}\b", " ", remainder).strip()
+    # Also drop canonical words if present.
+    canon_norm = _normalize_for_lookup(canonical_brand)
+    if canon_norm:
+        remainder = re.sub(rf"\b{re.escape(canon_norm)}\b", " ", remainder).strip()
+    remainder = _normalize_space(remainder)
+    derived_product = _clean_label_text(remainder.title() if remainder else None)
+    if _is_bad_product_label(derived_product):
+        derived_product = None
+    return canonical_brand, derived_product or product
+
+
 def _clean_label_text(value: Optional[str]) -> Optional[str]:
     """Remove OCR punctuation/noise around display fields like brand/product."""
     text = _coerce_optional_str(value)
@@ -136,6 +276,7 @@ def _clean_label_text(value: Optional[str]) -> Optional[str]:
         return None
     text = re.sub(r"^[#*~|_`'\".,;:+=\-\s]+", "", text)
     text = re.sub(r"[#*~|_`'\".,;:+=\-\s]+$", "", text)
+    text = re.sub(r"[®™©]+", "", text)
     text = re.sub(r"<[^>]+>", " ", text)
     text = _normalize_space(text)
     if not text:
@@ -148,13 +289,106 @@ def _clean_label_text(value: Optional[str]) -> Optional[str]:
     return text
 
 
+def _looks_like_date_or_batch_line(value: str) -> bool:
+    text = _normalize_space(value)
+    if not text:
+        return True
+    low = text.lower()
+    # Date/time stamp-like strings commonly printed near seal area.
+    if re.search(r"\b\d{1,2}\s*(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s*\d{2,4}\b", low):
+        return True
+    if re.search(r"\b(?:mfg|mfd|pkd|exp|use by|best before|batch|lot)\b", low):
+        return True
+    if re.search(r"\b\d{1,2}:\d{2}\b", text):
+        return True
+    if re.fullmatch(r"[A-Z0-9\s:/\-]{4,20}", text) and re.search(r"\d", text):
+        # Handles noisy uppercase print codes like "09 MAR 15", "2257 A-10", etc.
+        return True
+    return False
+
+
 def _looks_noisy_line(value: str) -> bool:
     low = value.lower()
     if _NOISE_LINE_RE.search(low):
         return True
+    if _looks_like_date_or_batch_line(value):
+        return True
     if re.fullmatch(r"[\d\s\-/.:|]{6,}", value):
         return True
     return False
+
+
+def _is_bad_product_label(value: Optional[str]) -> bool:
+    text = _coerce_optional_str(value)
+    if not text:
+        return True
+    low = text.lower()
+    bad = (
+        "net wt",
+        "net qty",
+        "net weight",
+        "net quantity",
+        "mrp",
+        "batch",
+        "packed on",
+        "best before",
+        "manufactured",
+        "marketed by",
+    )
+    if any(token in low for token in bad):
+        return True
+    # Nutrition-claim lines should not become product names.
+    if re.search(r"\b\d{1,3}\s*%\b", low) and re.search(r"\b(fat|protein|carbohydrate|sugar|energy|kcal)\b", low):
+        return True
+    return False
+
+
+def _split_brand_product_from_line(value: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Heuristic split for lines like 'Nilgiris 1905 LITE MILK RUSK'."""
+    text = _clean_label_text(value)
+    if not text:
+        return None, None
+    parts = text.split()
+    if len(parts) < 2:
+        return text, None
+    brand = _clean_label_text(parts[0])
+    # Remove year/number + marketing qualifiers from product tail.
+    tail = " ".join(parts[1:])
+    tail = re.sub(r"\b\d{2,4}\b", " ", tail)
+    tail = re.sub(r"\b(?:lite|classic|premium|original|since|estd?|est\.)\b", " ", tail, flags=re.I)
+    product = _clean_label_text(_normalize_space(tail))
+    if _is_bad_product_label(product):
+        return brand, None
+    return brand, product
+
+
+def _finalize_front_brand_product(
+    brand_name: Optional[str],
+    product_name: Optional[str],
+) -> tuple[Optional[str], Optional[str]]:
+    """Final cleanup for front API brand/product precision."""
+    brand = _clean_label_text(brand_name)
+    product = _clean_label_text(product_name)
+
+    if _is_bad_product_label(product):
+        product = None
+
+    # If brand came as combined string (e.g., "Amul Fresh Cream"), split it.
+    if brand and (not product or _is_bad_product_label(product)):
+        split_brand, split_product = _split_brand_product_from_line(brand)
+        if split_brand:
+            brand = split_brand
+        if split_product:
+            product = split_product
+
+    # If still missing, avoid returning noisy product placeholders.
+    if _is_bad_product_label(product):
+        product = None
+
+    # Deterministic correction using known Indian brand lexicon.
+    brand, product = _apply_brand_lexicon(brand, product)
+
+    return brand, product
 
 
 def _contains_markup_or_table(value: str) -> bool:
@@ -195,23 +429,9 @@ def _is_high_quality_nutrition(value: Optional[str]) -> bool:
     text = _coerce_optional_str(value)
     if not text:
         return False
-    if _contains_markup_or_table(text):
+    if _looks_like_packaging_logistics_blob(text):
         return False
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    if not lines:
-        return False
-    if any(_looks_noisy_line(ln) for ln in lines):
-        return False
-    nutrient_hits = sum(
-        1
-        for ln in lines
-        if re.search(
-            r"\b(energy|protein|fat|carbohydrate|sugar|sodium|calcium|cholesterol|fiber|fibre)\b",
-            ln,
-            flags=re.I,
-        )
-    )
-    return nutrient_hits >= 2
+    return _looks_like_nutrition_text(text)
 
 
 def _extract_emails(text: str) -> list[str]:
@@ -335,6 +555,19 @@ def _extract_gtin(text: str, fssai: Optional[str]) -> Optional[str]:
         if len(digits) in _VALID_LENGTHS and digits != fssai:
             return digits
 
+    # Tier 1.5 — human-readable EAN line (e.g. "8 901063 405011" under barcode)
+    for line in text.splitlines():
+        s = line.strip()
+        if len(s) < 10:
+            continue
+        if sum(1 for c in s if c.isdigit() or c in " \t.-") < len(s) * 0.72:
+            continue
+        digits = re.sub(r"\D", "", s)
+        if len(digits) not in _VALID_LENGTHS or digits == fssai:
+            continue
+        if _gtin_checksum_valid(digits):
+            return digits
+
     # Tier 2: lone number on its own line + checksum
     for m in re.finditer(r"(?m)^\s*(\d{8,14})\s*$", text):
         digits = m.group(1)
@@ -358,31 +591,209 @@ def _is_valid_gtin(value: str, fssai: Optional[str]) -> bool:
     )
 
 
+def _opencv_barcode_variant_pils(gray_pil: Any) -> list[Any]:
+    """Binarization / CLAHE variants for pyzbar on curved or glossy labels."""
+    if not _OPENCV_AVAILABLE or Image is None or np is None or cv2 is None:
+        return []
+
+    try:
+        g = np.asarray(gray_pil.convert("L"))
+    except Exception:
+        return []
+
+    if g.ndim != 2 or g.size < 64:
+        return []
+
+    out: list[Any] = []
+
+    def as_pil_u8(arr: Any) -> Any:
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
+        return Image.fromarray(arr, mode="L")
+
+    try:
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        out.append(as_pil_u8(clahe.apply(g)))
+    except Exception:
+        pass
+
+    blur = cv2.GaussianBlur(g, (3, 3), 0)
+    h, w = g.shape[:2]
+    block = max(15, (min(h, w) // 22) | 1)
+    if block % 2 == 0:
+        block += 1
+    c = max(2, block // 5)
+
+    try:
+        th = cv2.adaptiveThreshold(
+            blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, block, c
+        )
+        out.append(as_pil_u8(th))
+        out.append(as_pil_u8(255 - th))
+    except Exception:
+        pass
+
+    try:
+        _, otsu = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        out.append(as_pil_u8(otsu))
+        out.append(as_pil_u8(255 - otsu))
+    except Exception:
+        pass
+
+    try:
+        _, otsu2 = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        k = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 1))
+        out.append(as_pil_u8(cv2.morphologyEx(otsu2, cv2.MORPH_CLOSE, k)))
+    except Exception:
+        pass
+
+    if min(h, w) < 520:
+        try:
+            scale = 2.5
+            up = cv2.resize(
+                g, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC
+            )
+            ublur = cv2.GaussianBlur(up, (3, 3), 0)
+            _, uo = cv2.threshold(ublur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            out.append(as_pil_u8(uo))
+            out.append(as_pil_u8(255 - uo))
+            clahe2 = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            out.append(as_pil_u8(clahe2.apply(up)))
+        except Exception:
+            pass
+
+    return out
+
+
+def _barcode_preprocess_variants(im: Any) -> list[Any]:
+    """Generate image variants before zbar_decode (curved glare / small barcodes fail on raw PIL)."""
+    if Image is None:
+        return []
+
+    try:
+        from PIL import ImageEnhance, ImageOps  # type: ignore[import-not-found]
+    except Exception:
+        ImageEnhance = None  # type: ignore[misc]
+        ImageOps = None  # type: ignore[misc]
+
+    try:
+        resample = Image.Resampling.LANCZOS  # type: ignore[attr-defined]
+    except AttributeError:
+        resample = Image.LANCZOS  # type: ignore[attr-defined]
+
+    if im.mode in ("RGBA", "P"):
+        im = im.convert("RGB")
+
+    variants: list[Any] = []
+
+    def _cap(img: Any, longest: int = 2000) -> Any:
+        w, h = img.size
+        m = max(w, h)
+        if m <= longest:
+            return img
+        scale = longest / float(m)
+        return img.resize((int(w * scale), int(h * scale)), resample)
+
+    im = _cap(im)
+    variants.append(im)
+    gray = im.convert("L")
+    variants.append(gray)
+    if ImageOps is not None:
+        variants.append(ImageOps.autocontrast(gray))
+        variants.append(ImageOps.equalize(gray))
+    if ImageEnhance is not None:
+        variants.append(ImageEnhance.Sharpness(gray).enhance(2.0))
+
+    w, h = im.size
+    if min(w, h) < 640:
+        scale = 768 / float(min(w, h))
+        big = gray.resize((int(w * scale), int(h * scale)), resample)
+        variants.append(big)
+        if ImageOps is not None:
+            variants.append(ImageOps.autocontrast(big))
+        if _OPENCV_AVAILABLE:
+            try:
+                variants.extend(_opencv_barcode_variant_pils(big))
+            except Exception:
+                pass
+
+    if _OPENCV_AVAILABLE:
+        try:
+            variants.extend(_opencv_barcode_variant_pils(gray))
+        except Exception:
+            pass
+
+    return variants
+
+
 def _decode_barcodes_from_bytes(body: bytes) -> list[str]:
     if not BARCODE_LIB_AVAILABLE:
         return []
 
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def _collect(decoded_items: Any) -> None:
+        for item in decoded_items:
+            raw = item.data.decode("utf-8", errors="ignore").strip()
+            if not raw:
+                continue
+            candidates = re.findall(r"\d{8,14}", raw) or [raw]
+            for candidate in candidates:
+                digits = re.sub(r"\D", "", candidate)
+                if not digits:
+                    continue
+                if digits not in seen:
+                    seen.add(digits)
+                    found.append(digits)
+
     try:
         with Image.open(io.BytesIO(body)) as image:
-            decoded = zbar_decode(image)
+            image.load()
+            if image.mode in ("RGBA", "P"):
+                image = image.convert("RGB")
+
+            variants = _barcode_preprocess_variants(image)
+            w, h = image.size
+            for frac in (0.14, 0.22, 0.3):
+                if h < 64 or w < 64:
+                    break
+                y0 = max(0, int(h * (1.0 - frac)))
+                if y0 >= h - 12:
+                    continue
+                band = image.crop((0, y0, w, h))
+                try:
+                    variants.extend(_barcode_preprocess_variants(band))
+                except Exception:
+                    continue
+
+            variants = variants[:56]
+
+            for pil_im in variants:
+                try:
+                    _collect(zbar_decode(pil_im))
+                except Exception:
+                    continue
+                if len(found) >= 3:
+                    break
+            if not found:
+                for pil_im in variants[:22]:
+                    for angle in (-90, 90, 180, -180):
+                        fill: int | str = 255 if pil_im.mode == "L" else "white"
+                        try:
+                            _collect(
+                                zbar_decode(
+                                    pil_im.rotate(angle, expand=True, fillcolor=fill)
+                                )
+                            )
+                        except Exception:
+                            continue
+                        if found:
+                            break
+                    if found:
+                        break
     except Exception:
         return []
 
-    found: list[str] = []
-    seen: set[str] = set()
-    for item in decoded:
-        raw = item.data.decode("utf-8", errors="ignore").strip()
-        if not raw:
-            continue
-
-        candidates = re.findall(r"\d{8,14}", raw) or [raw]
-        for candidate in candidates:
-            digits = re.sub(r"\D", "", candidate)
-            if not digits:
-                continue
-            if digits not in seen:
-                seen.add(digits)
-                found.append(digits)
     return found
 
 
@@ -505,6 +916,8 @@ def _extract_brand_product(text: str) -> tuple[Optional[str], Optional[str]]:
         "best before",
         "net wt",
         "net qty",
+        "net weight",
+        "net quantity",
     )
     candidates: list[str] = []
     for line in lines[:30]:
@@ -530,6 +943,10 @@ def _extract_brand_product(text: str) -> tuple[Optional[str], Optional[str]]:
         if line != brand:
             product = _clean_label_text(line)
             break
+    if _is_bad_product_label(product) and brand:
+        split_brand, split_product = _split_brand_product_from_line(brand)
+        brand = split_brand or brand
+        product = split_product
     return brand, product
 
 
@@ -640,6 +1057,94 @@ def _extract_html_table(text: str) -> Optional[str]:
     return match.group(0).strip()
 
 
+def _looks_like_packaging_logistics_blob(value: str) -> bool:
+    """True when OCR looks like licence/MRP/Batch/net-wt/legal panel, not nutrient tables."""
+    text = _normalize_space(value)
+    if not text:
+        return False
+    low = text.lower()
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()] or [text]
+    pack_markers = (
+        "mfg. lic",
+        "mfg lic",
+        "manufacturing lic",
+        "manufactured by",
+        "packed by",
+        "batch no",
+        "mrp",
+        "m.r.p",
+        "maximum retail price",
+        "nett w",
+        "net wt",
+        "net qty",
+        "net weight",
+        "lic. no",
+        "license no",
+        "lic no",
+        "pkd.",
+        "mfg.",
+        "mfg date",
+        "incl.",
+        "inclusive of",
+    )
+    pack_hits = sum(1 for ln in lines if any(m in ln.lower() for m in pack_markers))
+
+    nutrient_hits = sum(
+        1
+        for ln in lines
+        if re.search(
+            r"\benergy\b|\bkcal\b|\bcal\b|\bcalorie|\bkj\b|\bprotein\b|\bfat\b|"
+            r"\bcarbohydrate|\bsugar\b|\bsodium\b|\bsalt\b|\bcholesterol\b|"
+            r"\bfibre|\bfiber\b|\bcalcium\b|\bvitamin",
+            ln,
+            flags=re.I,
+        )
+    )
+    if pack_hits >= 2:
+        # Strong packaging panel ⇒ never nutrition unless real nutrient rows outweigh it.
+        return nutrient_hits < 3
+    if any(m in low for m in pack_markers[:8]) and "nutrient" not in low and "nutrition" not in low:
+        if nutrient_hits < 2:
+            return True
+    return False
+
+
+def _looks_like_nutrition_text(value: str) -> bool:
+    """Return True only when text resembles nutrition content (not arbitrary table text)."""
+    text = _normalize_space(value)
+    if not text:
+        return False
+    if _looks_like_packaging_logistics_blob(text):
+        return False
+    low = text.lower()
+    nutrient_alternatives = (
+        r"energy\b|k(?:cal|j)\b|kilojoule|kilocalorie|\bcals?\b|calories\b|calorie\b"
+        r"|proteins?\b|carbohydrate|carbs?\b|total sugar|added sugar|\bsugar(s)?\b"
+        r"|\bfat\b|sat\.?\s*fat|trans\s*fat|cholesterol\b|fib(?:er|re)\b|\bsodi(?:um)?\b"
+        r"|salt\b|\bcalcium\b|vitamins?\b|niacin\b"
+        r"|\bio\d+\b|rda\b|%?\s*rda\b|\bdv\b|daily value\b|servings?\b"
+        r"|per\s*(?:100\s*g|serve|portion)\b|\bapprox\.?\s*values\b"
+        r"|of which\b"
+    )
+    nutrient_terms = tuple(
+        m.group(0) for m in re.finditer(nutrient_alternatives, low, flags=re.I)
+    )
+    nutrient_hits = len(set(term.lower().strip() for term in nutrient_terms))
+    number_hits = len(re.findall(r"\b\d+(?:\.\d+)?\b", text))
+    # Require nutrient vocabulary plus quantity columns (typical NF tables contain numbers).
+    return nutrient_hits >= 3 and number_hits >= 2
+
+
+def _extract_nutrition_table(text: str) -> Optional[str]:
+    """Pick the first table that actually looks like nutrition information."""
+    for m in re.finditer(r"<table\b[\s\S]*?</table>", text, flags=re.I):
+        table_html = m.group(0).strip()
+        table_text = _html_table_to_readable_lines(table_html)
+        if table_text and _looks_like_nutrition_text(table_text):
+            return table_html
+    return None
+
+
 def _html_table_to_readable_lines(html: str) -> str:
     """Turn an HTML <table> into plain lines: one row per line, cells separated by ' | '."""
     rows: list[str] = []
@@ -686,13 +1191,13 @@ def _nutrition_to_readable(value: Any) -> Optional[str]:
     low = text.lower()
     if "<table" in low or "<tr" in low or "<td" in low or "<th" in low:
         readable = _html_table_to_readable_lines(text)
-        if readable.strip():
+        if readable.strip() and _looks_like_nutrition_text(readable):
             return readable.strip()
-        fallback = _normalize_space(re.sub(r"<[^>]+>", " ", text))
-        return fallback or None
+        return None
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     if not lines:
-        return _normalize_space(text)
+        blob = _normalize_space(text)
+        return blob if _looks_like_nutrition_text(blob) else None
     deduped: list[str] = []
     seen: set[str] = set()
     for ln in lines:
@@ -704,7 +1209,10 @@ def _nutrition_to_readable(value: Any) -> Optional[str]:
             continue
         seen.add(key)
         deduped.append(norm)
-    return "\n".join(deduped) if deduped else None
+    joined = "\n".join(deduped) if deduped else None
+    if not joined:
+        return None
+    return joined if _looks_like_nutrition_text(joined) else None
 
 
 def _extract_product_fields(
@@ -714,8 +1222,10 @@ def _extract_product_fields(
     fssai = _extract_fssai(text)
     emails = _extract_emails(text)
     phones = _extract_phones(text)
-    table_html = _extract_html_table(text)
+    table_html = _extract_nutrition_table(text)
     gtin = barcode_gtin
+    if not gtin:
+        gtin = _extract_gtin(text, fssai)
     brand_name, product_name = _extract_brand_product(text)
 
     nutritional = table_html or _extract_section(
@@ -725,14 +1235,29 @@ def _extract_product_fields(
             "nutritional facts",
             "nutrition information",
             "nutritional information",
-            "nutrition",
+            "nutrition declaration",
+            "nutrients per",
+            "typical nutritional",
+            "amount per serving",
+            "daily value",
+            "nutritional value",
         ),
         stop_keywords=(
             "ingredients",
             "allergen",
+            "composition",
+            "indications",
+            "contradictions",
+            "dosage",
+            "manufactured by",
+            "mfd. by",
+            "packed by",
             "storage",
             "manufacturer",
             "marketed by",
+            "customer care",
+            "toll free",
+            "website",
             "fssai",
             "directions",
             "serving suggestion",
@@ -1004,6 +1529,10 @@ async def decode_barcode(file: UploadFile = File(...)) -> dict[str, Any]:
 
     barcodes = await _decode_barcodes_with_timeout(body, fail_on_timeout=True)
     gtin = _pick_gtin_from_barcodes(barcodes, None)
+    if not gtin:
+        text = await _extract_text_from_bytes(body, file.filename or "")
+        fssai = _extract_fssai(text)
+        gtin = _extract_gtin(text, fssai)
     return {
         "decoded": barcodes,
         "gtin": gtin,
@@ -1077,8 +1606,10 @@ async def legacy_front(front: UploadFile = File(...)) -> dict[str, Any]:
     pre_process = time.perf_counter() - t0
     regex_brand_name, regex_product_name = _extract_brand_product(text)
     llm_fields = await _extract_structured_with_qwen(text)
-    brand_name = _clean_label_text(_coerce_optional_str(llm_fields.get("brand_name")) or regex_brand_name)
-    product_name = _clean_label_text(_coerce_optional_str(llm_fields.get("product_name")) or regex_product_name)
+    brand_name, product_name = _finalize_front_brand_product(
+        _coerce_optional_str(llm_fields.get("brand_name")) or regex_brand_name,
+        _coerce_optional_str(llm_fields.get("product_name")) or regex_product_name,
+    )
 
     total = time.perf_counter() - request_start
     return {
@@ -1254,6 +1785,11 @@ async def parse_product(file: UploadFile = File(...)) -> dict[str, Any]:
     else:
         merged_email = None
 
+    final_brand, final_product = _finalize_front_brand_product(
+        _coerce_optional_str(llm_fields.get("brand_name")) or regex_fields.get("brand_name"),
+        _coerce_optional_str(llm_fields.get("product_name")) or regex_fields.get("product_name"),
+    )
+
     fields: dict[str, Optional[str]] = {
         "gtin": merged_gtin,
         "fssai": regex_fields.get("fssai"),
@@ -1264,8 +1800,8 @@ async def parse_product(file: UploadFile = File(...)) -> dict[str, Any]:
         "email": merged_email,
         "phone": regex_fields.get("phone"),
         "best_before": _normalize_best_before(llm_fields.get("best_before")) or _normalize_best_before(regex_fields.get("best_before")),
-        "brand_name": _clean_label_text(_coerce_optional_str(llm_fields.get("brand_name")) or regex_fields.get("brand_name")),
-        "product_name": _clean_label_text(_coerce_optional_str(llm_fields.get("product_name")) or regex_fields.get("product_name")),
+        "brand_name": final_brand,
+        "product_name": final_product,
     }
     llm_ingredients = _normalize_ingredients(llm_fields.get("ingredients"))
     llm_nutrition = _normalize_nutrition(llm_fields.get("nutrition"))
